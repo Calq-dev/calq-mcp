@@ -1,0 +1,28 @@
+{
+    "name": "calq-mcp",
+    "version": "1.0.0",
+    "description": "MCP server for time tracking, project management, and memory with AI-powered search",
+    "type": "module",
+    "main": "src/index.js",
+    "bin": {
+        "calq-mcp": "./src/index.js"
+    },
+    "scripts": {
+        "start": "node src/index.js",
+        "dev": "node --watch src/index.js"
+    },
+    "keywords": [
+        "mcp",
+        "time-tracking",
+        "project-management",
+        "memory",
+        "productivity"
+    ],
+    "author": "",
+    "license": "MIT",
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.0.0",
+        "express": "^5.2.1",
+        "voyageai": "^0.0.8"
+    }
+}

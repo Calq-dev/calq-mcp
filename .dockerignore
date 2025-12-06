@@ -1,0 +1,7 @@
+# Ignore everything by default
+*
+
+# Include only what we need
+!package.json
+!package-lock.json
+!src/
