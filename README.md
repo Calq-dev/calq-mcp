@@ -1,113 +1,181 @@
-# Time Tracker MCP Server
+# Calq MCP
 
-A simple MCP server for tracking time spent on projects. Use it from Claude Code or Claude Desktop to log time with natural language.
+A Model Context Protocol (MCP) server for time tracking, project management, AI-powered memory, and team collaboration.
 
 ## Features
 
-### Timer
-- **`start`** - Start timing a task ("I'm gonna start working on this now")
-- **`stop`** - Stop the timer and log the time ("Finished that task!")
-- **`timer_status`** - Check if a timer is running
-- **`cancel_timer`** - Discard timer without saving
+### ⏱️ Time Tracking
+- **Timer system** - Start/stop timers for real-time tracking
+- **Manual logging** - Log time with backdating support
+- **Billing** - Mark entries as billable/billed, track unbilled time
 
-### Logging
-- **`commit`** - Log time and/or a summary to a project. Billable by default.
-- **`delete`** - Remove an entry (last one by default, or by ID)
-- **`edit`** - Modify an existing entry (message, minutes, project, billable, or billed status)
+### 🧠 AI-Powered Memory
+- **Semantic search** - Find memories and entries by meaning, not just keywords
+- **Personal & shared** - Keep notes private or share with your team
+- **Project/client linking** - Associate memories with specific projects or clients
+- Powered by [Voyage AI](https://voyageai.com) embeddings and reranking
 
-### Summaries
-- **`list_projects`** - View all projects with total time spent
-- **`get_project_summary`** - Get detailed entries for a specific project
-- **`get_today_summary`** - View all work done today
-- **`get_weekly_summary`** - View this week's summary
-- **`get_unbilled`** - View unbilled billable time by project
+### 👥 Team Collaboration
+- **GitHub OAuth** - Authenticate team members via GitHub
+- **Role-based access** - Admin and member roles
+- **User tracking** - All entries tagged with user identity
+
+### 📊 Project & Client Management
+- **Clients** - Manage client information
+- **Projects** - Link projects to clients with hourly rates
+- **Invoice summaries** - Get unbilled time grouped by client with calculated values
 
 ## Installation
 
+### Prerequisites
+- Node.js 18+
+- Docker (optional)
+
+### Local Setup
+
 ```bash
-cd /path/to/time-tracker-mcp
+git clone https://github.com/Calq-dev/calq-mcp.git
+cd calq-mcp
 npm install
 ```
 
-## Usage Examples
+### Docker
 
-Once connected, you can use natural language in Claude:
-
-**Timer workflow:**
-- *"Start timing the website project: Working on the navigation"*
-- *"Stop the timer"* (or *"Finished!"*)
-
-**Direct logging:**
-- *"Commit 30 minutes to the website project: Fixed the navigation menu"*
-- *"Log 15 minutes to internal meeting, non-billable"*
-
-**Managing entries:**
-- *"Delete the last entry"*
-- *"Mark entry abc123 as billed"*
-
-**Summaries:**
-- *"What's my unbilled time?"*
-- *"Show me my projects"*
-- *"What did I work on today?"*
+```bash
+docker build -t calq-mcp .
+```
 
 ## Configuration
 
 ### Claude Desktop
 
-Add to your `~/Library/Application Support/Claude/claude_desktop_config.json`:
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
-    "time-tracker": {
+    "calq": {
       "command": "node",
-      "args": ["/full/path/to/time-tracker-mcp/src/index.js"]
+      "args": ["/path/to/calq-mcp/src/index.js"],
+      "env": {
+        "VOYAGE_API_KEY": "your-voyage-api-key",
+        "GITHUB_CLIENT_ID": "your-github-client-id",
+        "GITHUB_CLIENT_SECRET": "your-github-client-secret",
+        "CALQ_USER": "your-github-username"
+      }
     }
   }
 }
 ```
 
-### Claude Code
-
-Add to your MCP settings:
-
-```json
-{
-  "time-tracker": {
-    "command": "node",
-    "args": ["/full/path/to/time-tracker-mcp/src/index.js"]
-  }
-}
-```
-
-## Docker
-
-Build the image:
-
-```bash
-docker build -t time-tracker-mcp .
-```
-
-Use in Claude Desktop config:
+### Docker Configuration
 
 ```json
 {
   "mcpServers": {
-    "time-tracker": {
+    "calq": {
       "command": "docker",
-      "args": [
-        "run", "-i", "--rm",
-        "-v", "time-tracker-data:/data",
-        "time-tracker-mcp"
-      ]
+      "args": ["run", "-i", "--rm", "-v", "calq-data:/data", "-p", "3847:3847", "calq-mcp"],
+      "env": {
+        "VOYAGE_API_KEY": "your-voyage-api-key",
+        "GITHUB_CLIENT_ID": "your-github-client-id",
+        "GITHUB_CLIENT_SECRET": "your-github-client-secret",
+        "CALQ_USER": "your-github-username"
+      }
     }
   }
 }
+```
+
+## Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `VOYAGE_API_KEY` | Yes | Voyage AI API key for memory features |
+| `GITHUB_CLIENT_ID` | For auth | GitHub OAuth App client ID |
+| `GITHUB_CLIENT_SECRET` | For auth | GitHub OAuth App client secret |
+| `CALQ_USER` | Yes | Your GitHub username (after OAuth login) |
+| `AUTH_PORT` | No | Auth server port (default: 3847) |
+
+## GitHub OAuth Setup
+
+1. Go to [GitHub Developer Settings](https://github.com/settings/developers)
+2. Click "New OAuth App"
+3. Fill in:
+   - **Application name:** Calq
+   - **Homepage URL:** http://localhost:3847
+   - **Authorization callback URL:** http://localhost:3847/callback
+4. Copy the Client ID and generate a Client Secret
+5. Add both to your MCP configuration
+
+## Tools
+
+### Time Tracking
+
+| Tool | Description |
+|------|-------------|
+| `commit` | Log time with message, project, and optional date |
+| `start` | Start a timer for a project |
+| `stop` | Stop timer and log the time |
+| `timer_status` | Check if a timer is running |
+| `cancel_timer` | Discard timer without logging |
+| `delete` | Delete a time entry |
+| `edit` | Modify an existing entry |
+
+### Summaries
+
+| Tool | Description |
+|------|-------------|
+| `list_projects` | List all projects with total time |
+| `list_projects_detailed` | Projects with client info and values |
+| `get_project_summary` | Detailed summary for a project |
+| `get_today_summary` | Today's time by project |
+| `get_weekly_summary` | This week's time by day |
+| `get_unbilled` | Unbilled time summary |
+| `get_invoice_summary` | Unbilled time by client with values |
+
+### Memory
+
+| Tool | Description |
+|------|-------------|
+| `remember` | Store a memory (personal/shared, linked to project/client) |
+| `recall` | Search memories semantically |
+| `search_entries` | Search time entries semantically |
+| `list_memories` | List all memories |
+| `forget` | Delete a memory |
+
+### Clients & Projects
+
+| Tool | Description |
+|------|-------------|
+| `add_client` | Add a new client |
+| `list_clients` | List all clients |
+| `configure_project` | Create/update project with client and hourly rate |
+
+### Users (with OAuth)
+
+| Tool | Description |
+|------|-------------|
+| `whoami` | Show current user info |
+| `list_users` | List all users (admin only) |
+| `set_user_role` | Change user role (admin only) |
+| `team_summary` | Team activity summary |
+
+## Usage Examples
+
+```
+"Start timing the website project"
+"Stop - finished the navbar"
+"Log 2 hours to API work yesterday: implemented auth"
+"Remember: client wants deadline moved to January"
+"Recall: what did the client say about deadlines?"
+"What's my unbilled time for Acme Corp?"
+"Configure project website with client Acme and rate 95"
 ```
 
 ## Data Storage
 
-Time entries are stored in `~/.time-tracker-mcp/data.json` (or in a Docker volume when using containers).
+Data is stored in `~/.calq/data.json` (or `/data/.calq/data.json` in Docker with volume mount).
 
 ## License
 
