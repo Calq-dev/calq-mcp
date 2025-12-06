@@ -4,6 +4,10 @@ A Model Context Protocol (MCP) server for time tracking, project management, AI-
 
 ## Features
 
+### 🌐 Transport Modes
+- **Stdio** (default) - For local Claude Desktop/Code integration
+- **HTTP Streaming** - For remote deployment with SSE support
+
 ### ⏱️ Time Tracking
 - **Timer system** - Start/stop timers for real-time tracking
 - **Manual logging** - Log time with backdating support
@@ -68,14 +72,35 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-### Docker Configuration
+### Docker Configuration (HTTP Mode)
+
+```bash
+# Build
+docker build -t calq-mcp .
+
+# Run in HTTP streaming mode
+docker run -d --name calq \
+  -p 3000:3000 \
+  -p 3847:3847 \
+  -v calq-data:/data \
+  -e VOYAGE_API_KEY=your-key \
+  -e GITHUB_CLIENT_ID=your-id \
+  -e GITHUB_CLIENT_SECRET=your-secret \
+  calq-mcp
+```
+
+Then connect via: `http://localhost:3000/mcp`
+
+### Docker Configuration (Stdio Mode)
+
+For Claude Desktop with stdio:
 
 ```json
 {
   "mcpServers": {
     "calq": {
       "command": "docker",
-      "args": ["run", "-i", "--rm", "-v", "calq-data:/data", "-p", "3847:3847", "calq-mcp"],
+      "args": ["run", "-i", "--rm", "-v", "calq-data:/data", "-e", "MCP_MODE=stdio", "calq-mcp"],
       "env": {
         "VOYAGE_API_KEY": "your-voyage-api-key",
         "GITHUB_CLIENT_ID": "your-github-client-id",
@@ -91,6 +116,8 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
+| `MCP_MODE` | No | `stdio` (default) or `http` |
+| `MCP_PORT` | No | HTTP port (default: 3000) |
 | `VOYAGE_API_KEY` | Yes | Voyage AI API key for memory features |
 | `GITHUB_CLIENT_ID` | For auth | GitHub OAuth App client ID |
 | `GITHUB_CLIENT_SECRET` | For auth | GitHub OAuth App client secret |

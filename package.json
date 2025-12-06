@@ -21,7 +21,7 @@
     "author": "",
     "license": "MIT",
     "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.0.0",
+        "@modelcontextprotocol/sdk": "^1.24.3",
         "express": "^5.2.1",
         "voyageai": "^0.0.8"
     }
