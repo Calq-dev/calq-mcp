@@ -1,171 +1,174 @@
-import { VoyageAIClient } from 'voyageai';
+import { ChromaClient } from 'chromadb';
+import { VoyageAIEmbeddingFunction } from '@chroma-core/voyageai';
 import { loadData, saveData, formatDuration } from './storage.js';
 
-// Initialize Voyage AI client (requires VOYAGE_API_KEY env var)
-let voyageClient = null;
+// Initialize ChromaDB client
+let chromaClient = null;
+let memoriesCollection = null;
+let entriesCollection = null;
+let voyageEmbedder = null;
 
-function getVoyageClient() {
-    if (!voyageClient) {
+async function getChromaClient() {
+    if (!chromaClient) {
+        const chromaUrl = process.env.CHROMA_URL || 'http://localhost:8000';
+        chromaClient = new ChromaClient({ path: chromaUrl });
+    }
+    return chromaClient;
+}
+
+async function getVoyageEmbedder() {
+    if (!voyageEmbedder) {
         const apiKey = process.env.VOYAGE_API_KEY;
         if (!apiKey) {
             throw new Error('VOYAGE_API_KEY environment variable is required for memory features');
         }
-        voyageClient = new VoyageAIClient({ apiKey });
+        voyageEmbedder = new VoyageAIEmbeddingFunction({
+            apiKey: apiKey,
+            model: 'voyage-3-lite'
+        });
     }
-    return voyageClient;
+    return voyageEmbedder;
 }
 
-/**
- * Generate embeddings for text
- * @param {string[]} texts - Array of texts to embed
- * @param {string} inputType - 'document' for storing, 'query' for searching
- * @returns {number[][]} Array of embeddings
- */
-export async function getEmbeddings(texts, inputType = 'document') {
-    const client = getVoyageClient();
-    const response = await client.embed({
-        input: texts,
-        model: 'voyage-3-lite',
-        inputType: inputType
-    });
-    return response.data.map(item => item.embedding);
-}
-
-/**
- * Rerank documents by relevance to query
- * @param {string} query - Search query
- * @param {string[]} documents - Documents to rerank
- * @param {number} topK - Number of top results to return
- * @returns {Object[]} Reranked documents with scores
- */
-export async function rerankDocuments(query, documents, topK = 5) {
-    const client = getVoyageClient();
-    const response = await client.rerank({
-        query: query,
-        documents: documents,
-        model: 'rerank-2-lite',
-        topK: Math.min(topK, documents.length)
-    });
-    return response.data;
-}
-
-/**
- * Calculate cosine similarity between two vectors
- * @param {number[]} a - First vector
- * @param {number[]} b - Second vector
- * @returns {number} Cosine similarity (-1 to 1)
- */
-function cosineSimilarity(a, b) {
-    let dotProduct = 0;
-    let normA = 0;
-    let normB = 0;
-    for (let i = 0; i < a.length; i++) {
-        dotProduct += a[i] * b[i];
-        normA += a[i] * a[i];
-        normB += b[i] * b[i];
+async function getMemoriesCollection() {
+    if (!memoriesCollection) {
+        const client = await getChromaClient();
+        const embedder = await getVoyageEmbedder();
+        memoriesCollection = await client.getOrCreateCollection({
+            name: 'calq_memories',
+            embeddingFunction: embedder
+        });
     }
-    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+    return memoriesCollection;
+}
+
+async function getEntriesCollection() {
+    if (!entriesCollection) {
+        const client = await getChromaClient();
+        const embedder = await getVoyageEmbedder();
+        entriesCollection = await client.getOrCreateCollection({
+            name: 'calq_entries',
+            embeddingFunction: embedder
+        });
+    }
+    return entriesCollection;
 }
 
 /**
- * Store a memory with its embedding
+ * Store a memory in ChromaDB
  * @param {string} content - Memory content
  * @param {Object} options - Optional settings
  * @returns {Object} The created memory
  */
 export async function storeMemory(content, options = {}) {
-    const data = loadData();
+    const collection = await getMemoriesCollection();
+    const currentUser = process.env.CALQ_USER || 'unknown';
 
-    // Initialize memories array if it doesn't exist
-    if (!data.memories) {
-        data.memories = [];
-    }
-
-    // Generate embedding
-    const [embedding] = await getEmbeddings([content], 'document');
-
-    const memory = {
-        id: Date.now().toString(36) + Math.random().toString(36).substr(2, 5),
-        content: content,
+    const id = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+    const metadata = {
         category: options.category || '',
-        shared: options.shared !== false, // Default to shared
-        projectId: options.project ? options.project.toLowerCase().trim() : null,
-        clientId: options.client ? options.client.toLowerCase().trim().replace(/\s+/g, '-') : null,
-        user: process.env.CALQ_USER || 'unknown',
-        embedding: embedding,
+        shared: options.shared !== false,
+        projectId: options.project ? options.project.toLowerCase().trim() : '',
+        clientId: options.client ? options.client.toLowerCase().trim().replace(/\s+/g, '-') : '',
+        user: currentUser,
         createdAt: new Date().toISOString()
     };
 
-    data.memories.push(memory);
+    await collection.add({
+        ids: [id],
+        documents: [content],
+        metadatas: [metadata]
+    });
+
+    // Also store in JSON for backup
+    const data = loadData();
+    if (!data.memories) data.memories = [];
+    data.memories.push({ id, content, ...metadata });
     saveData(data);
 
-    return memory;
+    return { id, content, ...metadata };
 }
 
 /**
- * Search memories semantically
+ * Search memories semantically using ChromaDB
  * @param {string} query - Search query
  * @param {Object} options - Filter options
  * @returns {Object[]} Matching memories
  */
 export async function searchMemories(query, options = {}) {
+    const collection = await getMemoriesCollection();
+    const currentUser = process.env.CALQ_USER || 'unknown';
+    const limit = options.limit || 5;
+
+    // Build where filter
+    const whereConditions = [];
+
+    // Only show shared memories or own personal memories
+    whereConditions.push({
+        '$or': [
+            { shared: true },
+            { user: currentUser }
+        ]
+    });
+
+    if (options.project) {
+        whereConditions.push({ projectId: options.project.toLowerCase().trim() });
+    }
+
+    if (options.client) {
+        whereConditions.push({ clientId: options.client.toLowerCase().trim().replace(/\s+/g, '-') });
+    }
+
+    const whereFilter = whereConditions.length > 1
+        ? { '$and': whereConditions }
+        : whereConditions[0] || {};
+
+    try {
+        const results = await collection.query({
+            queryTexts: [query],
+            nResults: limit,
+            where: Object.keys(whereFilter).length > 0 ? whereFilter : undefined
+        });
+
+        if (!results.documents || !results.documents[0]) {
+            return [];
+        }
+
+        return results.documents[0].map((doc, i) => ({
+            id: results.ids[0][i],
+            content: doc,
+            ...results.metadatas[0][i],
+            distance: results.distances ? results.distances[0][i] : null,
+            relevanceScore: results.distances ? 1 - results.distances[0][i] : null
+        }));
+    } catch (error) {
+        console.error('ChromaDB search error:', error.message);
+        // Fallback to basic search if ChromaDB is not available
+        return fallbackSearchMemories(query, options);
+    }
+}
+
+/**
+ * Fallback search when ChromaDB is not available
+ */
+function fallbackSearchMemories(query, options = {}) {
     const data = loadData();
     const currentUser = process.env.CALQ_USER || 'unknown';
     const limit = options.limit || 5;
-    const useReranking = options.rerank !== false;
 
-    if (!data.memories || data.memories.length === 0) {
-        return [];
-    }
+    if (!data.memories) return [];
 
-    // Filter memories based on visibility and scope
-    let filteredMemories = data.memories.filter(m => {
-        // Check visibility: shared OR own personal memories
-        if (!m.shared && m.user !== currentUser) return false;
+    const queryLower = query.toLowerCase();
 
-        // Filter by project if specified
-        if (options.project && m.projectId !== options.project.toLowerCase().trim()) return false;
-
-        // Filter by client if specified
-        if (options.client && m.clientId !== options.client.toLowerCase().trim().replace(/\s+/g, '-')) return false;
-
-        return true;
-    });
-
-    if (filteredMemories.length === 0) {
-        return [];
-    }
-
-    // Get query embedding
-    const [queryEmbedding] = await getEmbeddings([query], 'query');
-
-    // Calculate similarities
-    const memoriesWithScores = filteredMemories.map(memory => ({
-        ...memory,
-        similarity: cosineSimilarity(queryEmbedding, memory.embedding)
-    }));
-
-    // Sort by similarity
-    memoriesWithScores.sort((a, b) => b.similarity - a.similarity);
-
-    // Take top candidates (more than limit for reranking)
-    const candidates = memoriesWithScores.slice(0, useReranking ? limit * 2 : limit);
-
-    if (useReranking && candidates.length > 1) {
-        // Rerank for better precision
-        const reranked = await rerankDocuments(
-            query,
-            candidates.map(m => m.content),
-            limit
-        );
-
-        return reranked.map(r => ({
-            ...candidates[r.index],
-            relevanceScore: r.relevanceScore
-        }));
-    }
-
-    return candidates.slice(0, limit);
+    return data.memories
+        .filter(m => {
+            if (!m.shared && m.user !== currentUser) return false;
+            if (options.project && m.projectId !== options.project.toLowerCase()) return false;
+            if (options.client && m.clientId !== options.client.toLowerCase()) return false;
+            return m.content.toLowerCase().includes(queryLower);
+        })
+        .slice(0, limit)
+        .map(m => ({ ...m, relevanceScore: null }));
 }
 
 /**
@@ -188,19 +191,57 @@ export async function searchEntries(query, limit = 10) {
         return [];
     }
 
-    // Use reranking directly (more efficient for this use case)
-    const documents = entriesWithText.map(e =>
-        `${e.description} (${data.projects[e.project]?.name || e.project})`
-    );
+    try {
+        const collection = await getEntriesCollection();
 
-    const reranked = await rerankDocuments(query, documents, limit);
+        // Ensure entries are indexed
+        const existingIds = (await collection.get()).ids;
+        const newEntries = entriesWithText.filter(e => !existingIds.includes(e.id));
 
-    return reranked.map(r => ({
-        ...entriesWithText[r.index],
-        projectName: data.projects[entriesWithText[r.index].project]?.name || entriesWithText[r.index].project,
-        relevanceScore: r.relevanceScore,
-        durationFormatted: formatDuration(entriesWithText[r.index].minutes)
-    }));
+        if (newEntries.length > 0) {
+            await collection.add({
+                ids: newEntries.map(e => e.id),
+                documents: newEntries.map(e => `${e.description} (${data.projects[e.project]?.name || e.project})`),
+                metadatas: newEntries.map(e => ({
+                    project: e.project,
+                    minutes: e.minutes,
+                    user: e.user || 'unknown',
+                    createdAt: e.createdAt
+                }))
+            });
+        }
+
+        const results = await collection.query({
+            queryTexts: [query],
+            nResults: limit
+        });
+
+        if (!results.ids || !results.ids[0]) {
+            return [];
+        }
+
+        return results.ids[0].map((id, i) => {
+            const entry = entriesWithText.find(e => e.id === id);
+            return {
+                ...entry,
+                projectName: data.projects[entry?.project]?.name || entry?.project,
+                relevanceScore: results.distances ? 1 - results.distances[0][i] : null,
+                durationFormatted: formatDuration(entry?.minutes || 0)
+            };
+        }).filter(Boolean);
+    } catch (error) {
+        console.error('ChromaDB entries search error:', error.message);
+        // Fallback to basic search
+        const queryLower = query.toLowerCase();
+        return entriesWithText
+            .filter(e => e.description.toLowerCase().includes(queryLower))
+            .slice(0, limit)
+            .map(e => ({
+                ...e,
+                projectName: data.projects[e.project]?.name || e.project,
+                durationFormatted: formatDuration(e.minutes)
+            }));
+    }
 }
 
 /**
@@ -208,7 +249,7 @@ export async function searchEntries(query, limit = 10) {
  * @param {string} memoryId - Memory ID to delete
  * @returns {Object|null} Deleted memory or null
  */
-export function deleteMemory(memoryId) {
+export async function deleteMemory(memoryId) {
     const data = loadData();
 
     if (!data.memories) {
@@ -220,6 +261,14 @@ export function deleteMemory(memoryId) {
 
     const deleted = data.memories.splice(index, 1)[0];
     saveData(data);
+
+    // Also delete from ChromaDB
+    try {
+        const collection = await getMemoriesCollection();
+        await collection.delete({ ids: [memoryId] });
+    } catch (error) {
+        console.error('ChromaDB delete error:', error.message);
+    }
 
     return deleted;
 }

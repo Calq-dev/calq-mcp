@@ -483,6 +483,74 @@ server.tool(
     }
 );
 
+// Tool: Capture an idea (shortcut for remember with category=idea)
+server.tool(
+    'idea',
+    {
+        content: z.string().describe('The idea to capture'),
+        project: z.string().optional().describe('Link to a project'),
+        client: z.string().optional().describe('Link to a client')
+    },
+    async ({ content, project, client }) => {
+        try {
+            const memory = await storeMemory(content, {
+                category: 'idea',
+                shared: true,
+                project: project || null,
+                client: client || null
+            });
+
+            let text = '💡 **Idea captured!**';
+            if (project) text += `\n📁 Project: ${project}`;
+            if (client) text += `\n👤 Client: ${client}`;
+            text += `\n\n${content}`;
+
+            return {
+                content: [{ type: 'text', text }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: 'text', text: `❌ ${error.message}` }]
+            };
+        }
+    }
+);
+
+// Tool: List all ideas
+server.tool(
+    'list_ideas',
+    {
+        project: z.string().optional().describe('Filter by project'),
+        client: z.string().optional().describe('Filter by client')
+    },
+    async ({ project, client }) => {
+        const memories = getAllMemories({
+            category: 'idea',
+            project: project || null,
+            client: client || null
+        });
+
+        if (memories.length === 0) {
+            return {
+                content: [{ type: 'text', text: '💡 No ideas yet. Capture one with "idea: your brilliant thought"' }]
+            };
+        }
+
+        let text = '💡 **Ideas** (' + memories.length + ')\n\n';
+        for (const idea of memories.slice(-20).reverse()) {
+            const date = new Date(idea.createdAt).toLocaleDateString();
+            let meta = [];
+            if (idea.projectId) meta.push('📁 ' + idea.projectId);
+            if (idea.clientId) meta.push('👤 ' + idea.clientId);
+            text += '• `' + idea.id + '` ' + idea.content.substring(0, 80) + (idea.content.length > 80 ? '...' : '') + (meta.length ? ' [' + meta.join(', ') + ']' : '') + ' - ' + date + '\n';
+        }
+
+        return {
+            content: [{ type: 'text', text }]
+        };
+    }
+);
+
 // Tool: Recall memories
 server.tool(
     'recall',

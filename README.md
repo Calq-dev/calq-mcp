@@ -17,7 +17,8 @@ A Model Context Protocol (MCP) server for time tracking, project management, AI-
 - **Semantic search** - Find memories and entries by meaning, not just keywords
 - **Personal & shared** - Keep notes private or share with your team
 - **Project/client linking** - Associate memories with specific projects or clients
-- Powered by [Voyage AI](https://voyageai.com) embeddings and reranking
+- **Vector storage** - [ChromaDB](https://trychroma.com) for scalable embeddings
+- Powered by [Voyage AI](https://voyageai.com) embeddings
 
 ### 👥 Team Collaboration
 - **GitHub OAuth** - Authenticate team members via GitHub
