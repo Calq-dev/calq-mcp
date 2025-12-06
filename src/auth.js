@@ -1,121 +1,19 @@
-import { loadData, saveData } from './storage.js';
+import {
+    createUser,
+    getUser,
+    getUsers,
+    updateUser,
+    deleteUser
+} from './storage.js';
 import http from 'http';
 import https from 'https';
 import { URL } from 'url';
 import crypto from 'crypto';
 
-// ==================== USER MANAGEMENT ====================
+// Re-export user functions for usage in index.js
+export { createUser, getUser, getUsers, updateUser, deleteUser };
 
-/**
- * Create a new user
- * @param {string} username - Username (usually GitHub username)
- * @param {string} email - Email
- * @param {string} role - Role: 'admin' or 'member'
- * @param {string} githubId - Optional GitHub user ID
- * @returns {Object} The created user
- */
-export function createUser(username, email, role = 'member', githubId = null) {
-    const data = loadData();
-
-    if (!data.users) data.users = {};
-
-    const id = username.toLowerCase().trim();
-
-    if (data.users[id]) {
-        return { error: 'User already exists', user: data.users[id] };
-    }
-
-    const user = {
-        id: id,
-        username: username,
-        email: email,
-        role: role, // 'admin' or 'member'
-        githubId: githubId,
-        createdAt: new Date().toISOString(),
-        lastLogin: null
-    };
-
-    data.users[id] = user;
-    saveData(data);
-
-    return user;
-}
-
-/**
- * Get all users
- * @returns {Array} List of users
- */
-export function getUsers() {
-    const data = loadData();
-    return Object.values(data.users || {}).map(u => ({
-        id: u.id,
-        username: u.username,
-        email: u.email,
-        role: u.role,
-        lastLogin: u.lastLogin
-    }));
-}
-
-/**
- * Get a user by ID or GitHub ID
- * @param {string} identifier - User ID or GitHub ID
- * @returns {Object|null} The user or null
- */
-export function getUser(identifier) {
-    const data = loadData();
-
-    // Try by ID first
-    if (data.users?.[identifier.toLowerCase()]) {
-        return data.users[identifier.toLowerCase()];
-    }
-
-    // Try by GitHub ID
-    for (const user of Object.values(data.users || {})) {
-        if (user.githubId === identifier) {
-            return user;
-        }
-    }
-
-    return null;
-}
-
-/**
- * Update a user
- * @param {string} userId - User ID
- * @param {Object} updates - Fields to update
- * @returns {Object|null} Updated user or null
- */
-export function updateUser(userId, updates) {
-    const data = loadData();
-    const id = userId.toLowerCase();
-
-    if (!data.users?.[id]) return null;
-
-    if (updates.email !== undefined) data.users[id].email = updates.email;
-    if (updates.role !== undefined) data.users[id].role = updates.role;
-    if (updates.lastLogin !== undefined) data.users[id].lastLogin = updates.lastLogin;
-
-    saveData(data);
-    return data.users[id];
-}
-
-/**
- * Delete a user
- * @param {string} userId - User ID
- * @returns {Object|null} Deleted user or null
- */
-export function deleteUser(userId) {
-    const data = loadData();
-    const id = userId.toLowerCase();
-
-    if (!data.users?.[id]) return null;
-
-    const deleted = data.users[id];
-    delete data.users[id];
-    saveData(data);
-
-    return deleted;
-}
+// ==================== AUTH HELPERS ====================
 
 /**
  * Check if user has admin role
