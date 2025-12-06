@@ -36,7 +36,8 @@ async function getMemoriesCollection() {
         const embedder = await getVoyageEmbedder();
         memoriesCollection = await client.getOrCreateCollection({
             name: 'calq_memories',
-            embeddingFunction: embedder
+            embeddingFunction: embedder,
+            metadata: { "hnsw:space": "cosine" }
         });
     }
     return memoriesCollection;
@@ -48,7 +49,8 @@ async function getEntriesCollection() {
         const embedder = await getVoyageEmbedder();
         entriesCollection = await client.getOrCreateCollection({
             name: 'calq_entries',
-            embeddingFunction: embedder
+            embeddingFunction: embedder,
+            metadata: { "hnsw:space": "cosine" }
         });
     }
     return entriesCollection;
