@@ -4,6 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import express from 'express';
 import { AsyncLocalStorage } from 'async_hooks';
+import crypto from 'crypto';
 import { z } from 'zod';
 import {
     addEntry,
@@ -37,16 +38,13 @@ import {
     getAllMemories
 } from './memory.js';
 import {
-    validateCurrentUser,
-    requireUser,
-    requireAdmin,
     getUsers,
     getUser,
-    createUser,
     updateUser as updateUserAuth,
     deleteUser as deleteUserAuth,
-    startAuthServer,
-    validateSession
+    getAuthUrl,
+    getMcpSessionFromState,
+    handleOAuthCallback
 } from './auth.js';
 
 // Request context for passing authenticated user to tool handlers
@@ -58,21 +56,11 @@ function getCurrentUser() {
     return store?.user || null;
 }
 
-// Start auth server if GitHub OAuth is configured
-if (process.env.GITHUB_CLIENT_ID) {
-    startAuthServer(parseInt(process.env.AUTH_PORT || '3847'));
-}
-
-// Helper to check user before tool execution (uses request context)
+// Helper to check user before tool execution
 function checkUser() {
     const user = getCurrentUser();
     if (!user) {
-        // Fall back to env var for backward compatibility
-        const result = validateCurrentUser();
-        if (!result.valid) {
-            return { error: result.error };
-        }
-        return { user: result.user };
+        return { error: 'Not authenticated. Please complete OAuth login first.' };
     }
     return { user };
 }
@@ -1026,43 +1014,39 @@ async function main() {
     // Store sessions
     const sessions = new Map();
 
+    // Store pending auth sessions (MCP session ID -> auth state)
+    const pendingAuth = new Map();
+
     // MCP endpoint - HTTP streaming only
     app.post('/mcp', async (req, res) => {
         const sessionId = req.headers['mcp-session-id'];
-        const authHeader = req.headers.authorization;
-
-        // Get user from token (if provided) or fall back to CALQ_USER env var
-        let user = null;
-        if (authHeader?.startsWith('Bearer ')) {
-            const token = authHeader.slice(7);
-            user = validateSession(token);
-        }
-
-        // Fall back to env var for Claude Desktop / local usage
-        if (!user && process.env.CALQ_USER) {
-            const { getUser } = await import('./storage.js');
-            user = getUser(process.env.CALQ_USER);
-        }
 
         let transport;
         let newSessionId;
+        let user = null;
 
         if (sessionId && sessions.has(sessionId)) {
             const session = sessions.get(sessionId);
             transport = session.transport;
-            // Use session's user if request doesn't have one
-            if (!user) user = session.user;
+            user = session.user;
         } else {
             // Create new session
             newSessionId = crypto.randomUUID();
             transport = new StreamableHTTPServerTransport({
                 sessionId: newSessionId
             });
+
+            // Check if this session completed OAuth
+            if (pendingAuth.has(newSessionId)) {
+                user = pendingAuth.get(newSessionId);
+                pendingAuth.delete(newSessionId);
+            }
+
             sessions.set(newSessionId, { transport, user });
             await server.connect(transport);
         }
 
-        // Run request with user context (may be null for unauthenticated)
+        // Run request with user context
         await requestContext.run({ user }, async () => {
             try {
                 const response = await transport.handleRequest(req.body);
@@ -1076,6 +1060,58 @@ async function main() {
                 res.status(500).json({ error: err.message });
             }
         });
+    });
+
+    // OAuth initiation endpoint
+    app.get('/oauth/authorize', (req, res) => {
+        const { session_id } = req.query;
+
+        try {
+            // getAuthUrl stores session_id with the state internally
+            const { url } = getAuthUrl(session_id || null);
+            res.redirect(url);
+        } catch (error) {
+            res.status(500).send(`OAuth setup failed: ${error.message}`);
+        }
+    });
+
+    // OAuth callback endpoint - links OAuth result to MCP session
+    app.get('/oauth/callback', async (req, res) => {
+        const { code, state } = req.query;
+
+        if (!code || !state) {
+            res.status(400).send('Missing code or state');
+            return;
+        }
+
+        try {
+            // Get MCP session ID from the state before it's consumed
+            const mcpSessionId = getMcpSessionFromState(state);
+
+            // Handle the OAuth callback (validates state, exchanges code for token)
+            const result = await handleOAuthCallback(code, state);
+
+            // Link user to MCP session
+            if (mcpSessionId && sessions.has(mcpSessionId)) {
+                const session = sessions.get(mcpSessionId);
+                session.user = result.user;
+            } else if (mcpSessionId) {
+                pendingAuth.set(mcpSessionId, result.user);
+            }
+
+            res.send(`
+                <!DOCTYPE html>
+                <html>
+                <head><title>Calq - Authenticated</title></head>
+                <body style="font-family: system-ui; padding: 40px; text-align: center;">
+                    <h1>✅ Authenticated as ${result.user.username}</h1>
+                    <p>You can close this window and return to Claude.</p>
+                </body>
+                </html>
+            `);
+        } catch (error) {
+            res.status(500).send(`Authentication failed: ${error.message}`);
+        }
     });
 
     // Session cleanup
@@ -1094,9 +1130,7 @@ async function main() {
 
     app.listen(port, () => {
         console.error(`Calq MCP server running on http://localhost:${port}/mcp`);
-        if (process.env.GITHUB_CLIENT_ID) {
-            console.error(`Auth server: http://localhost:${process.env.AUTH_PORT || '3847'}`);
-        }
+        console.error(`OAuth: http://localhost:${port}/oauth/authorize`);
     });
 }
 

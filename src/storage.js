@@ -2,7 +2,6 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import crypto from 'crypto';
 
 // Data directory
 const DATA_DIR = process.env.CALQ_DATA_DIR || path.join(os.homedir(), '.calq');
@@ -112,17 +111,6 @@ function initSchema() {
         )
     `);
 
-    // Sessions table for auth tokens
-    database.exec(`
-        CREATE TABLE IF NOT EXISTS sessions (
-            token TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            expires_at TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        )
-    `);
-
     // Create indexes
     database.exec(`
         CREATE INDEX IF NOT EXISTS idx_entries_project ON entries(project_id);
@@ -131,7 +119,6 @@ function initSchema() {
         CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
         CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
         CREATE INDEX IF NOT EXISTS idx_projects_client ON projects(client_id);
-        CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
     `);
 }
 
@@ -806,45 +793,3 @@ export function deleteUser(userId) {
     return user;
 }
 
-// ==================== SESSION FUNCTIONS ====================
-
-export function createSession(userId) {
-    const database = getDb();
-    const token = crypto.randomBytes(32).toString('hex');
-    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(); // 30 days
-
-    database.prepare(`
-        INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)
-    `).run(token, userId, expiresAt);
-
-    return { token, expiresAt };
-}
-
-export function validateSession(token) {
-    const database = getDb();
-    const session = database.prepare(`
-        SELECT s.*, u.* FROM sessions s
-        JOIN users u ON s.user_id = u.id
-        WHERE s.token = ? AND (s.expires_at IS NULL OR s.expires_at > datetime('now'))
-    `).get(token);
-
-    if (!session) return null;
-
-    return {
-        id: session.user_id,
-        username: session.username,
-        email: session.email,
-        role: session.role,
-        githubId: session.github_id
-    };
-}
-
-export function deleteSession(token) {
-    const database = getDb();
-    database.prepare('DELETE FROM sessions WHERE token = ?').run(token);
-}
-
-export function deleteUserSessions(userId) {
-    const database = getDb();
-    database.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
-}
