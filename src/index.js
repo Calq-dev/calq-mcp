@@ -1031,24 +1031,27 @@ async function main() {
         const sessionId = req.headers['mcp-session-id'];
         const authHeader = req.headers.authorization;
 
-        // Validate auth token if provided
+        // Get user from token (if provided) or fall back to CALQ_USER env var
         let user = null;
         if (authHeader?.startsWith('Bearer ')) {
             const token = authHeader.slice(7);
             user = validateSession(token);
         }
 
-        // Require authentication
-        if (!user) {
-            res.status(401).json({ error: 'Authentication required. Get a token at /login on the auth server.' });
-            return;
+        // Fall back to env var for Claude Desktop / local usage
+        if (!user && process.env.CALQ_USER) {
+            const { getUser } = await import('./storage.js');
+            user = getUser(process.env.CALQ_USER);
         }
 
         let transport;
         let newSessionId;
 
         if (sessionId && sessions.has(sessionId)) {
-            transport = sessions.get(sessionId).transport;
+            const session = sessions.get(sessionId);
+            transport = session.transport;
+            // Use session's user if request doesn't have one
+            if (!user) user = session.user;
         } else {
             // Create new session
             newSessionId = crypto.randomUUID();
@@ -1059,7 +1062,7 @@ async function main() {
             await server.connect(transport);
         }
 
-        // Run request with user context
+        // Run request with user context (may be null for unauthenticated)
         await requestContext.run({ user }, async () => {
             try {
                 const response = await transport.handleRequest(req.body);
