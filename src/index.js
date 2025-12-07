@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import express from 'express';
+import { AsyncLocalStorage } from 'async_hooks';
+import crypto from 'crypto';
 import { z } from 'zod';
 import {
     addEntry,
@@ -35,29 +38,31 @@ import {
     getAllMemories
 } from './memory.js';
 import {
-    validateCurrentUser,
-    requireUser,
-    requireAdmin,
     getUsers,
     getUser,
-    createUser,
     updateUser as updateUserAuth,
     deleteUser as deleteUserAuth,
-    startAuthServer
+    getAuthUrl,
+    getMcpSessionFromState,
+    handleOAuthCallback
 } from './auth.js';
 
-// Start auth server if GitHub OAuth is configured
-if (process.env.GITHUB_CLIENT_ID) {
-    startAuthServer(parseInt(process.env.AUTH_PORT || '3847'));
+// Request context for passing authenticated user to tool handlers
+const requestContext = new AsyncLocalStorage();
+
+// Get the current authenticated user from request context
+function getCurrentUser() {
+    const store = requestContext.getStore();
+    return store?.user || null;
 }
 
 // Helper to check user before tool execution
 function checkUser() {
-    const result = validateCurrentUser();
-    if (!result.valid) {
-        return { error: result.error };
+    const user = getCurrentUser();
+    if (!user) {
+        return { error: 'Not authenticated. Please complete OAuth login first.' };
     }
-    return { user: result.user };
+    return { user };
 }
 
 // Create the MCP server
@@ -83,7 +88,7 @@ server.tool(
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
 
-        const entry = addEntry(project, minutes || 0, message, 'commit', billable !== false, date || null);
+        const entry = addEntry(project, minutes || 0, message, 'commit', billable !== false, date || null, auth.user.id);
 
         let text = `📌 **${project}**\n\n${message}`;
         if (minutes) {
@@ -257,7 +262,12 @@ server.tool(
     'get_today_summary',
     {},
     async () => {
-        const summary = getTodaySummary();
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const summary = getTodaySummary(auth.user.id);
 
         if (summary.projects.length === 0) {
             return {
@@ -291,7 +301,12 @@ server.tool(
     'get_weekly_summary',
     {},
     async () => {
-        const summary = getWeeklySummary();
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const summary = getWeeklySummary(auth.user.id);
 
         if (summary.days.length === 0) {
             return {
@@ -321,7 +336,12 @@ server.tool(
     'get_unbilled',
     {},
     async () => {
-        const summary = getUnbilledSummary();
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const summary = getUnbilledSummary(auth.user.id);
 
         if (summary.projects.length === 0) {
             return {
@@ -353,7 +373,12 @@ server.tool(
         description: z.string().optional().describe('What you are working on')
     },
     async ({ project, description }) => {
-        const result = startTimer(project, description || '');
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const result = startTimer(project, description || '', auth.user.id);
 
         if (result.error) {
             const elapsed = formatDuration(Math.round((new Date() - new Date(result.timer.startedAt)) / 60000));
@@ -382,7 +407,12 @@ server.tool(
         billable: z.boolean().optional().describe('Whether this is billable (defaults to true)')
     },
     async ({ message, billable }) => {
-        const result = stopTimer(message || null, billable !== false);
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const result = stopTimer(message || null, billable !== false, auth.user.id);
 
         if (result.error) {
             return {
@@ -407,7 +437,12 @@ server.tool(
     'timer_status',
     {},
     async () => {
-        const timer = getActiveTimer();
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const timer = getActiveTimer(auth.user.id);
 
         if (!timer) {
             return {
@@ -429,7 +464,12 @@ server.tool(
     'cancel_timer',
     {},
     async () => {
-        const timer = cancelTimer();
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const timer = cancelTimer(auth.user.id);
 
         if (!timer) {
             return {
@@ -805,7 +845,12 @@ server.tool(
     'get_invoice_summary',
     {},
     async () => {
-        const summary = getUnbilledByClient();
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const summary = getUnbilledByClient(auth.user.id);
 
         if (summary.clients.length === 0) {
             return {
@@ -943,11 +988,11 @@ server.tool(
             return { content: [{ type: 'text', text: '🔒 ' + auth.error }] };
         }
 
-        const today = getTodaySummary();
+        const today = getTodaySummary(auth.user.id);
         const users = getUsers();
 
         let text = '👥 **Team Summary** (' + new Date().toLocaleDateString() + ')\n';
-        text += '⏱️ Total today: ' + today.totalFormatted + '\n\n';
+        text += '⏱️ Your total today: ' + today.totalFormatted + '\n\n';
 
         for (const project of today.projects) {
             text += '**' + project.name + '**: ' + project.durationFormatted + '\n';
@@ -961,111 +1006,145 @@ server.tool(
 
 // Start the server
 async function main() {
-    const mode = process.env.MCP_MODE || 'stdio';
     const port = parseInt(process.env.MCP_PORT || '3000');
 
-    if (mode === 'http') {
-        // HTTP Streaming mode with SSE
-        const { StreamableHTTPServerTransport } = await import('@modelcontextprotocol/sdk/server/streamableHttp.js');
-        const express = (await import('express')).default;
+    const app = express();
+    app.use(express.json());
 
-        const app = express();
-        app.use(express.json());
+    // Store sessions
+    const sessions = new Map();
 
-        // Store sessions
-        const sessions = new Map();
+    // Store pending auth sessions (MCP session ID -> auth state)
+    const pendingAuth = new Map();
 
-        // MCP endpoint
-        app.all('/mcp', async (req, res) => {
-            const sessionId = req.headers['mcp-session-id'];
-
-            if (req.method === 'GET') {
-                // SSE connection for notifications
-                if (req.headers.accept !== 'text/event-stream') {
-                    res.status(400).send('Accept header must be text/event-stream for GET');
-                    return;
-                }
-
-                res.setHeader('Content-Type', 'text/event-stream');
-                res.setHeader('Cache-Control', 'no-cache');
-                res.setHeader('Connection', 'keep-alive');
-                res.flushHeaders();
-
-                // Keep connection alive
-                const keepAlive = setInterval(() => {
-                    res.write(': keepalive\n\n');
-                }, 30000);
-
-                req.on('close', () => {
-                    clearInterval(keepAlive);
-                    if (sessionId && sessions.has(sessionId)) {
-                        sessions.delete(sessionId);
-                    }
-                });
-                return;
-            }
-
-            if (req.method === 'POST') {
-                let transport;
-                let newSessionId;
-
-                if (sessionId && sessions.has(sessionId)) {
-                    transport = sessions.get(sessionId);
-                } else {
-                    // Create new session
-                    newSessionId = crypto.randomUUID();
-                    transport = new StreamableHTTPServerTransport({
-                        sessionId: newSessionId
-                    });
-                    sessions.set(newSessionId, transport);
-                    await server.connect(transport);
-                }
-
-                try {
-                    const response = await transport.handleRequest(req.body);
-
-                    if (newSessionId) {
-                        res.setHeader('mcp-session-id', newSessionId);
-                    }
-
-                    res.json(response);
-                } catch (err) {
-                    res.status(500).json({ error: err.message });
-                }
-                return;
-            }
-
-            if (req.method === 'DELETE') {
-                if (sessionId && sessions.has(sessionId)) {
-                    sessions.delete(sessionId);
-                }
-                res.status(204).end();
-                return;
-            }
-
-            res.status(405).send('Method not allowed');
+    // OAuth metadata endpoint (RFC 8414) - tells Claude Desktop where to auth
+    app.get('/.well-known/oauth-authorization-server', (req, res) => {
+        const baseUrl = process.env.BASE_URL || `http://localhost:${port}`;
+        res.json({
+            issuer: baseUrl,
+            authorization_endpoint: `${baseUrl}/oauth/authorize`,
+            token_endpoint: `${baseUrl}/oauth/token`,
+            response_types_supported: ['code'],
+            grant_types_supported: ['authorization_code'],
+            code_challenge_methods_supported: ['S256']
         });
+    });
 
-        // Health check
-        app.get('/health', (req, res) => {
-            res.json({ status: 'ok', mode: 'http', sessions: sessions.size });
-        });
+    // MCP endpoint - HTTP streaming only
+    app.post('/mcp', async (req, res) => {
+        const sessionId = req.headers['mcp-session-id'];
 
-        app.listen(port, () => {
-            console.error('Calq MCP server running on http://localhost:' + port + '/mcp');
-            if (process.env.GITHUB_CLIENT_ID) {
-                console.error('Auth server: http://localhost:' + (process.env.AUTH_PORT || '3847'));
+        let transport;
+        let newSessionId;
+        let user = null;
+
+        if (sessionId && sessions.has(sessionId)) {
+            const session = sessions.get(sessionId);
+            transport = session.transport;
+            user = session.user;
+        } else {
+            // Create new session
+            newSessionId = crypto.randomUUID();
+            transport = new StreamableHTTPServerTransport({
+                sessionId: newSessionId
+            });
+
+            // Check if this session completed OAuth
+            if (pendingAuth.has(newSessionId)) {
+                user = pendingAuth.get(newSessionId);
+                pendingAuth.delete(newSessionId);
             }
-        });
-    } else {
-        // Stdio mode (default)
-        const transport = new StdioServerTransport();
-        await server.connect(transport);
-        console.error('Calq MCP server running on stdio');
-        if (process.env.GITHUB_CLIENT_ID) {
-            console.error('Auth server: http://localhost:' + (process.env.AUTH_PORT || '3847'));
+
+            sessions.set(newSessionId, { transport, user });
+            await server.connect(transport);
         }
-    }
+
+        // Run request with user context
+        await requestContext.run({ user }, async () => {
+            try {
+                const response = await transport.handleRequest(req.body);
+
+                if (newSessionId) {
+                    res.setHeader('mcp-session-id', newSessionId);
+                }
+
+                res.json(response);
+            } catch (err) {
+                res.status(500).json({ error: err.message });
+            }
+        });
+    });
+
+    // OAuth initiation endpoint
+    app.get('/oauth/authorize', (req, res) => {
+        const { session_id } = req.query;
+
+        try {
+            // getAuthUrl stores session_id with the state internally
+            const { url } = getAuthUrl(session_id || null);
+            res.redirect(url);
+        } catch (error) {
+            res.status(500).send(`OAuth setup failed: ${error.message}`);
+        }
+    });
+
+    // OAuth callback endpoint - links OAuth result to MCP session
+    app.get('/oauth/callback', async (req, res) => {
+        const { code, state } = req.query;
+
+        if (!code || !state) {
+            res.status(400).send('Missing code or state');
+            return;
+        }
+
+        try {
+            // Get MCP session ID from the state before it's consumed
+            const mcpSessionId = getMcpSessionFromState(state);
+
+            // Handle the OAuth callback (validates state, exchanges code for token)
+            const result = await handleOAuthCallback(code, state);
+
+            // Link user to MCP session
+            if (mcpSessionId && sessions.has(mcpSessionId)) {
+                const session = sessions.get(mcpSessionId);
+                session.user = result.user;
+            } else if (mcpSessionId) {
+                pendingAuth.set(mcpSessionId, result.user);
+            }
+
+            res.send(`
+                <!DOCTYPE html>
+                <html>
+                <head><title>Calq - Authenticated</title></head>
+                <body style="font-family: system-ui; padding: 40px; text-align: center;">
+                    <h1>✅ Authenticated as ${result.user.username}</h1>
+                    <p>You can close this window and return to Claude.</p>
+                </body>
+                </html>
+            `);
+        } catch (error) {
+            res.status(500).send(`Authentication failed: ${error.message}`);
+        }
+    });
+
+    // Session cleanup
+    app.delete('/mcp', (req, res) => {
+        const sessionId = req.headers['mcp-session-id'];
+        if (sessionId && sessions.has(sessionId)) {
+            sessions.delete(sessionId);
+        }
+        res.status(204).end();
+    });
+
+    // Health check
+    app.get('/health', (req, res) => {
+        res.json({ status: 'ok', sessions: sessions.size });
+    });
+
+    app.listen(port, () => {
+        console.error(`Calq MCP server running on http://localhost:${port}/mcp`);
+        console.error(`OAuth: http://localhost:${port}/oauth/authorize`);
+    });
 }
 
 main().catch(console.error);

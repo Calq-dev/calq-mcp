@@ -165,18 +165,84 @@ function fallbackSearchMemories(query, options = {}) {
 }
 
 /**
- * Search time entries semantically (To be implemented with SQL/Chroma sync later)
- * For now relying on direct SQL implementation or simple text search
+ * Index a time entry in ChromaDB for semantic search
+ * @param {Object} entry - Entry object from storage
+ * @returns {boolean} Success status
+ */
+export async function indexEntry(entry) {
+    if (!entry.description) return false;
+
+    try {
+        const collection = await getEntriesCollection();
+        const document = `${entry.project}: ${entry.description}`;
+
+        await collection.add({
+            ids: [entry.id],
+            documents: [document],
+            metadatas: [{
+                projectId: entry.project,
+                minutes: entry.minutes,
+                type: entry.type || 'commit',
+                billable: entry.billable,
+                userId: entry.userId || '',
+                createdAt: entry.createdAt
+            }]
+        });
+        return true;
+    } catch (error) {
+        console.error('ChromaDB index entry error:', error.message);
+        return false;
+    }
+}
+
+/**
+ * Remove an entry from ChromaDB
+ * @param {string} entryId - Entry ID to remove
+ */
+export async function deleteEntryFromChroma(entryId) {
+    try {
+        const collection = await getEntriesCollection();
+        await collection.delete({ ids: [entryId] });
+    } catch (error) {
+        console.error('ChromaDB delete entry error:', error.message);
+    }
+}
+
+/**
+ * Search time entries semantically using ChromaDB
+ * @param {string} query - Search query
+ * @param {number} limit - Max results
+ * @returns {Object[]} Matching entries
  */
 export async function searchEntries(query, limit = 10) {
-    // Note: To fully support entry search in Chroma, we'd need to sync newly added entries 
-    // from storage.js to Chroma. For this iteration, we'll placeholder this or 
-    // implement a basic SQL-based search if needed in storage.js, 
-    // but the original architecture read from JSON. 
-    // A robust impl would require hooks in addEntry.
+    try {
+        const collection = await getEntriesCollection();
 
-    // For now returning empty to prevent breaking, or could implement SQL LIKE search here if imported
-    return [];
+        const results = await collection.query({
+            queryTexts: [query],
+            nResults: limit
+        });
+
+        if (!results.documents || !results.documents[0]) {
+            return [];
+        }
+
+        return results.documents[0].map((doc, i) => ({
+            id: results.ids[0][i],
+            description: doc,
+            projectName: results.metadatas[0][i].projectId,
+            minutes: results.metadatas[0][i].minutes,
+            durationFormatted: formatDuration(results.metadatas[0][i].minutes),
+            type: results.metadatas[0][i].type,
+            billable: results.metadatas[0][i].billable,
+            createdAt: results.metadatas[0][i].createdAt,
+            distance: results.distances ? results.distances[0][i] : null,
+            relevanceScore: results.distances ? 1 - results.distances[0][i] : null
+        }));
+    } catch (error) {
+        console.error('ChromaDB search entries error:', error.message);
+        return [];
+    }
 }
 
 /**
