@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import express from 'express';
 import { z } from 'zod';
 import {
     addEntry,
@@ -961,111 +962,65 @@ server.tool(
 
 // Start the server
 async function main() {
-    const mode = process.env.MCP_MODE || 'stdio';
     const port = parseInt(process.env.MCP_PORT || '3000');
 
-    if (mode === 'http') {
-        // HTTP Streaming mode with SSE
-        const { StreamableHTTPServerTransport } = await import('@modelcontextprotocol/sdk/server/streamableHttp.js');
-        const express = (await import('express')).default;
+    const app = express();
+    app.use(express.json());
 
-        const app = express();
-        app.use(express.json());
+    // Store sessions
+    const sessions = new Map();
 
-        // Store sessions
-        const sessions = new Map();
+    // MCP endpoint - HTTP streaming only
+    app.post('/mcp', async (req, res) => {
+        const sessionId = req.headers['mcp-session-id'];
+        let transport;
+        let newSessionId;
 
-        // MCP endpoint
-        app.all('/mcp', async (req, res) => {
-            const sessionId = req.headers['mcp-session-id'];
-
-            if (req.method === 'GET') {
-                // SSE connection for notifications
-                if (req.headers.accept !== 'text/event-stream') {
-                    res.status(400).send('Accept header must be text/event-stream for GET');
-                    return;
-                }
-
-                res.setHeader('Content-Type', 'text/event-stream');
-                res.setHeader('Cache-Control', 'no-cache');
-                res.setHeader('Connection', 'keep-alive');
-                res.flushHeaders();
-
-                // Keep connection alive
-                const keepAlive = setInterval(() => {
-                    res.write(': keepalive\n\n');
-                }, 30000);
-
-                req.on('close', () => {
-                    clearInterval(keepAlive);
-                    if (sessionId && sessions.has(sessionId)) {
-                        sessions.delete(sessionId);
-                    }
-                });
-                return;
-            }
-
-            if (req.method === 'POST') {
-                let transport;
-                let newSessionId;
-
-                if (sessionId && sessions.has(sessionId)) {
-                    transport = sessions.get(sessionId);
-                } else {
-                    // Create new session
-                    newSessionId = crypto.randomUUID();
-                    transport = new StreamableHTTPServerTransport({
-                        sessionId: newSessionId
-                    });
-                    sessions.set(newSessionId, transport);
-                    await server.connect(transport);
-                }
-
-                try {
-                    const response = await transport.handleRequest(req.body);
-
-                    if (newSessionId) {
-                        res.setHeader('mcp-session-id', newSessionId);
-                    }
-
-                    res.json(response);
-                } catch (err) {
-                    res.status(500).json({ error: err.message });
-                }
-                return;
-            }
-
-            if (req.method === 'DELETE') {
-                if (sessionId && sessions.has(sessionId)) {
-                    sessions.delete(sessionId);
-                }
-                res.status(204).end();
-                return;
-            }
-
-            res.status(405).send('Method not allowed');
-        });
-
-        // Health check
-        app.get('/health', (req, res) => {
-            res.json({ status: 'ok', mode: 'http', sessions: sessions.size });
-        });
-
-        app.listen(port, () => {
-            console.error('Calq MCP server running on http://localhost:' + port + '/mcp');
-            if (process.env.GITHUB_CLIENT_ID) {
-                console.error('Auth server: http://localhost:' + (process.env.AUTH_PORT || '3847'));
-            }
-        });
-    } else {
-        // Stdio mode (default)
-        const transport = new StdioServerTransport();
-        await server.connect(transport);
-        console.error('Calq MCP server running on stdio');
-        if (process.env.GITHUB_CLIENT_ID) {
-            console.error('Auth server: http://localhost:' + (process.env.AUTH_PORT || '3847'));
+        if (sessionId && sessions.has(sessionId)) {
+            transport = sessions.get(sessionId);
+        } else {
+            // Create new session
+            newSessionId = crypto.randomUUID();
+            transport = new StreamableHTTPServerTransport({
+                sessionId: newSessionId
+            });
+            sessions.set(newSessionId, transport);
+            await server.connect(transport);
         }
-    }
+
+        try {
+            const response = await transport.handleRequest(req.body);
+
+            if (newSessionId) {
+                res.setHeader('mcp-session-id', newSessionId);
+            }
+
+            res.json(response);
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    // Session cleanup
+    app.delete('/mcp', (req, res) => {
+        const sessionId = req.headers['mcp-session-id'];
+        if (sessionId && sessions.has(sessionId)) {
+            sessions.delete(sessionId);
+        }
+        res.status(204).end();
+    });
+
+    // Health check
+    app.get('/health', (req, res) => {
+        res.json({ status: 'ok', sessions: sessions.size });
+    });
+
+    app.listen(port, () => {
+        console.error(`Calq MCP server running on http://localhost:${port}/mcp`);
+        if (process.env.GITHUB_CLIENT_ID) {
+            console.error(`Auth server: http://localhost:${process.env.AUTH_PORT || '3847'}`);
+        }
+    });
 }
 
 main().catch(console.error);

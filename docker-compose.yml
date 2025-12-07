@@ -7,7 +7,6 @@ services:
       - "3000:3000" # MCP HTTP endpoint
       - "3847:3847" # OAuth server
     environment:
-      - MCP_MODE=http
       - MCP_PORT=3000
       - VOYAGE_API_KEY=${VOYAGE_API_KEY}
       - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
