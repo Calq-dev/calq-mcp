@@ -3,7 +3,10 @@ import {
     getUser,
     getUsers,
     updateUser,
-    deleteUser
+    deleteUser,
+    createSession,
+    validateSession,
+    deleteSession
 } from './storage.js';
 import http from 'http';
 import https from 'https';
@@ -11,7 +14,7 @@ import { URL } from 'url';
 import crypto from 'crypto';
 
 // Re-export user functions for usage in index.js
-export { createUser, getUser, getUsers, updateUser, deleteUser };
+export { createUser, getUser, getUsers, updateUser, deleteUser, validateSession, deleteSession };
 
 // ==================== AUTH HELPERS ====================
 
@@ -233,9 +236,13 @@ export async function handleOAuthCallback(code, state) {
     // Update last login
     updateUser(user.id, { lastLogin: new Date().toISOString() });
 
+    // Create session token
+    const session = createSession(user.id);
+
     return {
         user: user,
-        githubUser: githubUser
+        githubUser: githubUser,
+        token: session.token
     };
 }
 
@@ -278,10 +285,15 @@ export function startAuthServer(port = 3847) {
                     <body style="font-family: system-ui; padding: 40px; text-align: center;">
                         <h1>✅ Logged in as ${result.user.username}</h1>
                         <p>Role: ${result.user.role}</p>
-                        <p>You can close this window.</p>
-                        <p style="margin-top: 40px; color: #666;">
-                            Set <code>CALQ_USER=${result.user.id}</code> in your MCP config.
-                        </p>
+                        <div style="margin: 30px auto; max-width: 600px; text-align: left; background: #f5f5f5; padding: 20px; border-radius: 8px;">
+                            <p style="margin: 0 0 10px 0;"><strong>Your API Token:</strong></p>
+                            <code style="display: block; padding: 10px; background: #333; color: #0f0; border-radius: 4px; word-break: break-all; font-size: 12px;">${result.token}</code>
+                            <p style="margin: 15px 0 0 0; font-size: 13px; color: #666;">
+                                Use this token in the <code>Authorization</code> header:<br>
+                                <code>Authorization: Bearer ${result.token.substring(0, 8)}...</code>
+                            </p>
+                        </div>
+                        <p style="color: #666;">Save this token - it won't be shown again.</p>
                     </body>
                     </html>
                 `);

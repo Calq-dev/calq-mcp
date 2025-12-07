@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import crypto from 'crypto';
 
 // Data directory
 const DATA_DIR = process.env.CALQ_DATA_DIR || path.join(os.homedir(), '.calq');
@@ -99,15 +100,26 @@ function initSchema() {
         )
     `);
 
-    // Active timer table
+    // Active timer table (one per user)
     database.exec(`
         CREATE TABLE IF NOT EXISTS active_timer (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
+            user_id TEXT PRIMARY KEY,
             project_id TEXT,
             description TEXT,
-            user_id TEXT,
             started_at TEXT,
-            FOREIGN KEY (project_id) REFERENCES projects(id)
+            FOREIGN KEY (project_id) REFERENCES projects(id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    `);
+
+    // Sessions table for auth tokens
+    database.exec(`
+        CREATE TABLE IF NOT EXISTS sessions (
+            token TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            expires_at TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id)
         )
     `);
 
@@ -119,6 +131,7 @@ function initSchema() {
         CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
         CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
         CREATE INDEX IF NOT EXISTS idx_projects_client ON projects(client_id);
+        CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
     `);
 }
 
@@ -239,11 +252,11 @@ export function updateProject(projectId, updates) {
 
 // ==================== ENTRY FUNCTIONS ====================
 
-export function addEntry(projectName, minutes, description, type = 'commit', billable = true, date = null) {
+export function addEntry(projectName, minutes, description, type = 'commit', billable = true, date = null, userId = null) {
     const database = getDb();
     const project = getOrCreateProject(projectName);
     const id = generateId();
-    const userId = getCurrentUser();
+    const user = userId || getCurrentUser();
 
     let createdAt;
     if (date) {
@@ -259,13 +272,13 @@ export function addEntry(projectName, minutes, description, type = 'commit', bil
     database.prepare(`
         INSERT INTO entries (id, project_id, minutes, description, type, billable, user_id, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, project.id, minutes, description, type, billable ? 1 : 0, userId, createdAt);
+    `).run(id, project.id, minutes, description, type, billable ? 1 : 0, user, createdAt);
 
     // Update project total
     database.prepare('UPDATE projects SET total_minutes = total_minutes + ? WHERE id = ?')
         .run(minutes, project.id);
 
-    const entry = { id, project: project.id, minutes, description, type, billable, userId, createdAt };
+    const entry = { id, project: project.id, minutes, description, type, billable, userId: user, createdAt };
 
     // Index in ChromaDB for semantic search (async, non-blocking)
     import('./memory.js').then(({ indexEntry }) => {
@@ -345,53 +358,58 @@ export function getLastEntry() {
 
 // ==================== SUMMARY FUNCTIONS ====================
 
-export function getTodaySummary() {
+export function getTodaySummary(userId = null) {
     const database = getDb();
     const today = new Date().toISOString().split('T')[0];
+    const user = userId || getCurrentUser();
 
     const entries = database.prepare(`
         SELECT e.*, p.name as project_name
         FROM entries e
         JOIN projects p ON e.project_id = p.id
-        WHERE date(e.created_at) = date(?)
+        WHERE date(e.created_at) = date(?) AND e.user_id = ?
         ORDER BY e.created_at DESC
-    `).all(today);
+    `).all(today, user);
 
     const projectSummary = {};
     let totalMinutes = 0;
 
     for (const entry of entries) {
         if (!projectSummary[entry.project_id]) {
-            projectSummary[entry.project_id] = { name: entry.project_name, minutes: 0 };
+            projectSummary[entry.project_id] = { name: entry.project_name, minutes: 0, entries: [] };
         }
         projectSummary[entry.project_id].minutes += entry.minutes;
+        projectSummary[entry.project_id].entries.push(entry);
         totalMinutes += entry.minutes;
     }
 
     return {
+        date: today,
         totalMinutes,
         totalFormatted: formatDuration(totalMinutes),
         projects: Object.entries(projectSummary).map(([id, data]) => ({
             id,
             name: data.name,
             minutes: data.minutes,
-            durationFormatted: formatDuration(data.minutes)
+            durationFormatted: formatDuration(data.minutes),
+            entries: data.entries
         }))
     };
 }
 
-export function getWeeklySummary() {
+export function getWeeklySummary(userId = null) {
     const database = getDb();
+    const user = userId || getCurrentUser();
     const weekAgo = new Date();
     weekAgo.setDate(weekAgo.getDate() - 7);
 
     const entries = database.prepare(`
         SELECT date(created_at) as day, SUM(minutes) as total
         FROM entries
-        WHERE date(created_at) >= date(?)
+        WHERE date(created_at) >= date(?) AND user_id = ?
         GROUP BY date(created_at)
         ORDER BY day
-    `).all(weekAgo.toISOString().split('T')[0]);
+    `).all(weekAgo.toISOString().split('T')[0], user);
 
     let totalMinutes = 0;
     const days = entries.map(e => {
@@ -404,30 +422,34 @@ export function getWeeklySummary() {
     });
 
     return {
+        weekStart: weekAgo.toISOString().split('T')[0],
         totalMinutes,
         totalFormatted: formatDuration(totalMinutes),
         days
     };
 }
 
-export function getUnbilledSummary() {
+export function getUnbilledSummary(userId = null) {
     const database = getDb();
+    const user = userId || getCurrentUser();
+
     const entries = database.prepare(`
         SELECT e.*, p.name as project_name
         FROM entries e
         JOIN projects p ON e.project_id = p.id
-        WHERE e.billable = 1 AND e.billed = 0
-    `).all();
+        WHERE e.billable = 1 AND e.billed = 0 AND e.user_id = ?
+    `).all(user);
 
     const projectSummary = {};
     let totalMinutes = 0;
 
     for (const entry of entries) {
         if (!projectSummary[entry.project_id]) {
-            projectSummary[entry.project_id] = { name: entry.project_name, minutes: 0, count: 0 };
+            projectSummary[entry.project_id] = { name: entry.project_name, minutes: 0, count: 0, entries: [] };
         }
         projectSummary[entry.project_id].minutes += entry.minutes;
         projectSummary[entry.project_id].count++;
+        projectSummary[entry.project_id].entries.push(entry);
         totalMinutes += entry.minutes;
     }
 
@@ -439,20 +461,23 @@ export function getUnbilledSummary() {
             name: data.name,
             minutes: data.minutes,
             durationFormatted: formatDuration(data.minutes),
-            entryCount: data.count
+            entryCount: data.count,
+            entries: data.entries
         }))
     };
 }
 
-export function getUnbilledByClient() {
+export function getUnbilledByClient(userId = null) {
     const database = getDb();
+    const user = userId || getCurrentUser();
+
     const entries = database.prepare(`
         SELECT e.*, p.name as project_name, p.hourly_rate, c.id as client_id, c.name as client_name
         FROM entries e
         JOIN projects p ON e.project_id = p.id
         LEFT JOIN clients c ON p.client_id = c.id
-        WHERE e.billable = 1 AND e.billed = 0
-    `).all();
+        WHERE e.billable = 1 AND e.billed = 0 AND e.user_id = ?
+    `).all(user);
 
     const clientSummary = {};
     let totalMinutes = 0;
@@ -515,27 +540,28 @@ export function getUnbilledByClient() {
 
 // ==================== TIMER FUNCTIONS ====================
 
-export function startTimer(projectName, description = '') {
+export function startTimer(projectName, description = '', userId = null) {
     const database = getDb();
     const project = getOrCreateProject(projectName);
-    const userId = getCurrentUser();
+    const user = userId || getCurrentUser();
 
-    const existing = database.prepare('SELECT * FROM active_timer WHERE id = 1').get();
+    const existing = database.prepare('SELECT * FROM active_timer WHERE user_id = ?').get(user);
     if (existing && existing.project_id) {
         return { error: 'Timer already running', timer: existing };
     }
 
     database.prepare(`
-        INSERT OR REPLACE INTO active_timer (id, project_id, description, user_id, started_at)
-        VALUES (1, ?, ?, ?, ?)
-    `).run(project.id, description, userId, new Date().toISOString());
+        INSERT OR REPLACE INTO active_timer (user_id, project_id, description, started_at)
+        VALUES (?, ?, ?, ?)
+    `).run(user, project.id, description, new Date().toISOString());
 
     return { project: project.id, projectName: project.name, description, startedAt: new Date() };
 }
 
-export function stopTimer() {
+export function stopTimer(message = null, billable = true, userId = null) {
     const database = getDb();
-    const timer = database.prepare('SELECT * FROM active_timer WHERE id = 1').get();
+    const user = userId || getCurrentUser();
+    const timer = database.prepare('SELECT * FROM active_timer WHERE user_id = ?').get(user);
 
     if (!timer || !timer.project_id) {
         return { error: 'No timer running' };
@@ -544,25 +570,27 @@ export function stopTimer() {
     const startedAt = new Date(timer.started_at);
     const minutes = Math.round((Date.now() - startedAt.getTime()) / 60000);
 
-    const entry = addEntry(timer.project_id, minutes, timer.description || 'Timer session', 'timer', true);
+    const entry = addEntry(timer.project_id, minutes, message || timer.description || 'Timer session', 'timer', billable, null, user);
 
-    database.prepare('DELETE FROM active_timer WHERE id = 1').run();
+    database.prepare('DELETE FROM active_timer WHERE user_id = ?').run(user);
 
     return {
         entry,
+        minutes,
         duration: formatDuration(minutes),
         startedAt: timer.started_at
     };
 }
 
-export function getActiveTimer() {
+export function getActiveTimer(userId = null) {
     const database = getDb();
+    const user = userId || getCurrentUser();
     const timer = database.prepare(`
         SELECT t.*, p.name as project_name
         FROM active_timer t
         LEFT JOIN projects p ON t.project_id = p.id
-        WHERE t.id = 1
-    `).get();
+        WHERE t.user_id = ?
+    `).get(user);
 
     if (!timer || !timer.project_id) return null;
 
@@ -579,15 +607,16 @@ export function getActiveTimer() {
     };
 }
 
-export function cancelTimer() {
+export function cancelTimer(userId = null) {
     const database = getDb();
-    const timer = database.prepare('SELECT * FROM active_timer WHERE id = 1').get();
+    const user = userId || getCurrentUser();
+    const timer = database.prepare('SELECT * FROM active_timer WHERE user_id = ?').get(user);
 
     if (!timer || !timer.project_id) {
         return { error: 'No timer running' };
     }
 
-    database.prepare('DELETE FROM active_timer WHERE id = 1').run();
+    database.prepare('DELETE FROM active_timer WHERE user_id = ?').run(user);
 
     return { cancelled: true, project: timer.project_id };
 }
@@ -775,4 +804,47 @@ export function deleteUser(userId) {
 
     database.prepare('DELETE FROM users WHERE id = ?').run(userId.toLowerCase());
     return user;
+}
+
+// ==================== SESSION FUNCTIONS ====================
+
+export function createSession(userId) {
+    const database = getDb();
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(); // 30 days
+
+    database.prepare(`
+        INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)
+    `).run(token, userId, expiresAt);
+
+    return { token, expiresAt };
+}
+
+export function validateSession(token) {
+    const database = getDb();
+    const session = database.prepare(`
+        SELECT s.*, u.* FROM sessions s
+        JOIN users u ON s.user_id = u.id
+        WHERE s.token = ? AND (s.expires_at IS NULL OR s.expires_at > datetime('now'))
+    `).get(token);
+
+    if (!session) return null;
+
+    return {
+        id: session.user_id,
+        username: session.username,
+        email: session.email,
+        role: session.role,
+        githubId: session.github_id
+    };
+}
+
+export function deleteSession(token) {
+    const database = getDb();
+    database.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+}
+
+export function deleteUserSessions(userId) {
+    const database = getDb();
+    database.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
 }

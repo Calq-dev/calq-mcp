@@ -3,6 +3,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import express from 'express';
+import { AsyncLocalStorage } from 'async_hooks';
 import { z } from 'zod';
 import {
     addEntry,
@@ -44,21 +45,36 @@ import {
     createUser,
     updateUser as updateUserAuth,
     deleteUser as deleteUserAuth,
-    startAuthServer
+    startAuthServer,
+    validateSession
 } from './auth.js';
+
+// Request context for passing authenticated user to tool handlers
+const requestContext = new AsyncLocalStorage();
+
+// Get the current authenticated user from request context
+function getCurrentUser() {
+    const store = requestContext.getStore();
+    return store?.user || null;
+}
 
 // Start auth server if GitHub OAuth is configured
 if (process.env.GITHUB_CLIENT_ID) {
     startAuthServer(parseInt(process.env.AUTH_PORT || '3847'));
 }
 
-// Helper to check user before tool execution
+// Helper to check user before tool execution (uses request context)
 function checkUser() {
-    const result = validateCurrentUser();
-    if (!result.valid) {
-        return { error: result.error };
+    const user = getCurrentUser();
+    if (!user) {
+        // Fall back to env var for backward compatibility
+        const result = validateCurrentUser();
+        if (!result.valid) {
+            return { error: result.error };
+        }
+        return { user: result.user };
     }
-    return { user: result.user };
+    return { user };
 }
 
 // Create the MCP server
@@ -84,7 +100,7 @@ server.tool(
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
 
-        const entry = addEntry(project, minutes || 0, message, 'commit', billable !== false, date || null);
+        const entry = addEntry(project, minutes || 0, message, 'commit', billable !== false, date || null, auth.user.id);
 
         let text = `📌 **${project}**\n\n${message}`;
         if (minutes) {
@@ -258,7 +274,12 @@ server.tool(
     'get_today_summary',
     {},
     async () => {
-        const summary = getTodaySummary();
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const summary = getTodaySummary(auth.user.id);
 
         if (summary.projects.length === 0) {
             return {
@@ -292,7 +313,12 @@ server.tool(
     'get_weekly_summary',
     {},
     async () => {
-        const summary = getWeeklySummary();
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const summary = getWeeklySummary(auth.user.id);
 
         if (summary.days.length === 0) {
             return {
@@ -322,7 +348,12 @@ server.tool(
     'get_unbilled',
     {},
     async () => {
-        const summary = getUnbilledSummary();
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const summary = getUnbilledSummary(auth.user.id);
 
         if (summary.projects.length === 0) {
             return {
@@ -354,7 +385,12 @@ server.tool(
         description: z.string().optional().describe('What you are working on')
     },
     async ({ project, description }) => {
-        const result = startTimer(project, description || '');
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const result = startTimer(project, description || '', auth.user.id);
 
         if (result.error) {
             const elapsed = formatDuration(Math.round((new Date() - new Date(result.timer.startedAt)) / 60000));
@@ -383,7 +419,12 @@ server.tool(
         billable: z.boolean().optional().describe('Whether this is billable (defaults to true)')
     },
     async ({ message, billable }) => {
-        const result = stopTimer(message || null, billable !== false);
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const result = stopTimer(message || null, billable !== false, auth.user.id);
 
         if (result.error) {
             return {
@@ -408,7 +449,12 @@ server.tool(
     'timer_status',
     {},
     async () => {
-        const timer = getActiveTimer();
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const timer = getActiveTimer(auth.user.id);
 
         if (!timer) {
             return {
@@ -430,7 +476,12 @@ server.tool(
     'cancel_timer',
     {},
     async () => {
-        const timer = cancelTimer();
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const timer = cancelTimer(auth.user.id);
 
         if (!timer) {
             return {
@@ -806,7 +857,12 @@ server.tool(
     'get_invoice_summary',
     {},
     async () => {
-        const summary = getUnbilledByClient();
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const summary = getUnbilledByClient(auth.user.id);
 
         if (summary.clients.length === 0) {
             return {
@@ -944,11 +1000,11 @@ server.tool(
             return { content: [{ type: 'text', text: '🔒 ' + auth.error }] };
         }
 
-        const today = getTodaySummary();
+        const today = getTodaySummary(auth.user.id);
         const users = getUsers();
 
         let text = '👥 **Team Summary** (' + new Date().toLocaleDateString() + ')\n';
-        text += '⏱️ Total today: ' + today.totalFormatted + '\n\n';
+        text += '⏱️ Your total today: ' + today.totalFormatted + '\n\n';
 
         for (const project of today.projects) {
             text += '**' + project.name + '**: ' + project.durationFormatted + '\n';
@@ -973,32 +1029,50 @@ async function main() {
     // MCP endpoint - HTTP streaming only
     app.post('/mcp', async (req, res) => {
         const sessionId = req.headers['mcp-session-id'];
+        const authHeader = req.headers.authorization;
+
+        // Validate auth token if provided
+        let user = null;
+        if (authHeader?.startsWith('Bearer ')) {
+            const token = authHeader.slice(7);
+            user = validateSession(token);
+        }
+
+        // Require authentication
+        if (!user) {
+            res.status(401).json({ error: 'Authentication required. Get a token at /login on the auth server.' });
+            return;
+        }
+
         let transport;
         let newSessionId;
 
         if (sessionId && sessions.has(sessionId)) {
-            transport = sessions.get(sessionId);
+            transport = sessions.get(sessionId).transport;
         } else {
             // Create new session
             newSessionId = crypto.randomUUID();
             transport = new StreamableHTTPServerTransport({
                 sessionId: newSessionId
             });
-            sessions.set(newSessionId, transport);
+            sessions.set(newSessionId, { transport, user });
             await server.connect(transport);
         }
 
-        try {
-            const response = await transport.handleRequest(req.body);
+        // Run request with user context
+        await requestContext.run({ user }, async () => {
+            try {
+                const response = await transport.handleRequest(req.body);
 
-            if (newSessionId) {
-                res.setHeader('mcp-session-id', newSessionId);
+                if (newSessionId) {
+                    res.setHeader('mcp-session-id', newSessionId);
+                }
+
+                res.json(response);
+            } catch (err) {
+                res.status(500).json({ error: err.message });
             }
-
-            res.json(response);
-        } catch (err) {
-            res.status(500).json({ error: err.message });
-        }
+        });
     });
 
     // Session cleanup
