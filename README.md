@@ -4,10 +4,6 @@ A Model Context Protocol (MCP) server for time tracking, project management, AI-
 
 ## Features
 
-### 🌐 Transport Modes
-- **Stdio** (default) - For local Claude Desktop/Code integration
-- **HTTP Streaming** - For remote deployment with SSE support
-
 ### ⏱️ Time Tracking
 - **Timer system** - Start/stop timers for real-time tracking
 - **Manual logging** - Log time with backdating support
@@ -17,124 +13,105 @@ A Model Context Protocol (MCP) server for time tracking, project management, AI-
 - **Semantic search** - Find memories and entries by meaning, not just keywords
 - **Personal & shared** - Keep notes private or share with your team
 - **Project/client linking** - Associate memories with specific projects or clients
-- **Vector storage** - [ChromaDB](https://trychroma.com) for scalable embeddings
-- Powered by [Voyage AI](https://voyageai.com) embeddings
+- **Vector storage** - Powered by [ChromaDB](https://trychroma.com) and [Voyage AI](https://voyageai.com) embeddings
 
 ### 👥 Team Collaboration
-- **GitHub OAuth** - Authenticate team members via GitHub
+- **GitHub OAuth** - Authenticate team members via GitHub (integrated into MCP flow)
 - **Role-based access** - Admin and member roles
-- **User tracking** - All entries tagged with user identity
+- **Per-user data** - Timers and entries are user-scoped
 
 ### 📊 Project & Client Management
 - **Clients** - Manage client information
 - **Projects** - Link projects to clients with hourly rates
 - **Invoice summaries** - Get unbilled time grouped by client with calculated values
 
+## Prerequisites
+
+- Node.js 20+
+- **ChromaDB** - Vector database for semantic search
+- **Voyage AI API key** - For generating embeddings
+- **GitHub OAuth App** - For user authentication
+
 ## Installation
 
-### Prerequisites
-- Node.js 18+
-- Docker (optional)
+### Option 1: Docker Compose (Recommended)
 
-### Local Setup
+This automatically sets up both Calq and ChromaDB:
 
 ```bash
 git clone https://github.com/Calq-dev/calq-mcp.git
 cd calq-mcp
-npm install
+
+# Copy and configure environment
+cp .env.example .env
+# Edit .env with your API keys
+
+# Start services
+docker compose up -d
 ```
 
-### Docker
+Services:
+- **Calq MCP**: `http://localhost:3000/mcp`
+- **ChromaDB**: `http://localhost:8000` (internal)
+
+### Option 2: Local Development
 
 ```bash
-docker build -t calq-mcp .
+# 1. Start ChromaDB (required for memory features)
+docker run -d --name chromadb -p 8000:8000 chromadb/chroma:latest
+
+# 2. Clone and install
+git clone https://github.com/Calq-dev/calq-mcp.git
+cd calq-mcp
+npm install
+
+# 3. Configure environment
+cp .env.example .env
+# Edit .env with your API keys
+
+# 4. Start the server
+node src/index.js
 ```
 
 ## Configuration
 
-### Claude Desktop
-
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "calq": {
-      "command": "node",
-      "args": ["/path/to/calq-mcp/src/index.js"],
-      "env": {
-        "VOYAGE_API_KEY": "your-voyage-api-key",
-        "GITHUB_CLIENT_ID": "your-github-client-id",
-        "GITHUB_CLIENT_SECRET": "your-github-client-secret",
-        "CALQ_USER": "your-github-username"
-      }
-    }
-  }
-}
-```
-
-### Docker Configuration (HTTP Mode)
-
-```bash
-# Build
-docker build -t calq-mcp .
-
-# Run in HTTP streaming mode
-docker run -d --name calq \
-  -p 3000:3000 \
-  -p 3847:3847 \
-  -v calq-data:/data \
-  -e VOYAGE_API_KEY=your-key \
-  -e GITHUB_CLIENT_ID=your-id \
-  -e GITHUB_CLIENT_SECRET=your-secret \
-  calq-mcp
-```
-
-Then connect via: `http://localhost:3000/mcp`
-
-### Docker Configuration (Stdio Mode)
-
-For Claude Desktop with stdio:
-
-```json
-{
-  "mcpServers": {
-    "calq": {
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "-v", "calq-data:/data", "-e", "MCP_MODE=stdio", "calq-mcp"],
-      "env": {
-        "VOYAGE_API_KEY": "your-voyage-api-key",
-        "GITHUB_CLIENT_ID": "your-github-client-id",
-        "GITHUB_CLIENT_SECRET": "your-github-client-secret",
-        "CALQ_USER": "your-github-username"
-      }
-    }
-  }
-}
-```
-
-## Environment Variables
+### Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `MCP_MODE` | No | `stdio` (default) or `http` |
-| `MCP_PORT` | No | HTTP port (default: 3000) |
-| `VOYAGE_API_KEY` | Yes | Voyage AI API key for memory features |
-| `GITHUB_CLIENT_ID` | For auth | GitHub OAuth App client ID |
-| `GITHUB_CLIENT_SECRET` | For auth | GitHub OAuth App client secret |
-| `CALQ_USER` | Yes | Your GitHub username (after OAuth login) |
-| `AUTH_PORT` | No | Auth server port (default: 3847) |
+| `VOYAGE_API_KEY` | Yes | Voyage AI API key for embeddings |
+| `CHROMA_URL` | No | ChromaDB URL (default: `http://localhost:8000`) |
+| `GITHUB_CLIENT_ID` | Yes | GitHub OAuth App client ID |
+| `GITHUB_CLIENT_SECRET` | Yes | GitHub OAuth App client secret |
+| `MCP_PORT` | No | Server port (default: 3000) |
+| `OAUTH_CALLBACK_URL` | No | OAuth callback (default: `http://localhost:3000/oauth/callback`) |
 
-## GitHub OAuth Setup
+### GitHub OAuth Setup
 
 1. Go to [GitHub Developer Settings](https://github.com/settings/developers)
 2. Click "New OAuth App"
 3. Fill in:
    - **Application name:** Calq
-   - **Homepage URL:** http://localhost:3847
-   - **Authorization callback URL:** http://localhost:3847/callback
+   - **Homepage URL:** `http://localhost:3000`
+   - **Authorization callback URL:** `http://localhost:3000/oauth/callback`
 4. Copy the Client ID and generate a Client Secret
-5. Add both to your MCP configuration
+5. Add both to your `.env` file
+
+### Claude Desktop Configuration
+
+Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+
+```json
+{
+  "mcpServers": {
+    "calq": {
+      "url": "http://localhost:3000/mcp"
+    }
+  }
+}
+```
+
+When you first use Calq, Claude Desktop will open a browser for GitHub authentication.
 
 ## Tools
 
@@ -167,9 +144,11 @@ For Claude Desktop with stdio:
 | Tool | Description |
 |------|-------------|
 | `remember` | Store a memory (personal/shared, linked to project/client) |
+| `idea` | Quick capture an idea |
 | `recall` | Search memories semantically |
 | `search_entries` | Search time entries semantically |
 | `list_memories` | List all memories |
+| `list_ideas` | List all captured ideas |
 | `forget` | Delete a memory |
 
 ### Clients & Projects
@@ -180,7 +159,7 @@ For Claude Desktop with stdio:
 | `list_clients` | List all clients |
 | `configure_project` | Create/update project with client and hourly rate |
 
-### Users (with OAuth)
+### Users
 
 | Tool | Description |
 |------|-------------|
@@ -201,9 +180,32 @@ For Claude Desktop with stdio:
 "Configure project website with client Acme and rate 95"
 ```
 
+## Architecture
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  Claude Desktop │────▶│   Calq MCP      │────▶│    ChromaDB     │
+│                 │     │  (Port 3000)    │     │  (Port 8000)    │
+└─────────────────┘     └────────┬────────┘     └─────────────────┘
+                                 │
+                                 ▼
+                        ┌─────────────────┐
+                        │     SQLite      │
+                        │  (~/.calq/)     │
+                        └─────────────────┘
+```
+
+- **SQLite** - Source of truth for structured data (entries, projects, users)
+- **ChromaDB** - Vector store for semantic search (memories, entry embeddings)
+
 ## Data Storage
 
-Data is stored in `~/.calq/data.json` (or `/data/.calq/data.json` in Docker with volume mount).
+- **SQLite database**: `~/.calq/calq.db`
+- **ChromaDB**: Embeddings stored in ChromaDB container/instance
+
+In Docker, data is persisted via volumes:
+- `calq-data` - SQLite database
+- `chroma-data` - ChromaDB embeddings
 
 ## License
 
