@@ -1017,6 +1017,19 @@ async function main() {
     // Store pending auth sessions (MCP session ID -> auth state)
     const pendingAuth = new Map();
 
+    // OAuth metadata endpoint (RFC 8414) - tells Claude Desktop where to auth
+    app.get('/.well-known/oauth-authorization-server', (req, res) => {
+        const baseUrl = process.env.BASE_URL || `http://localhost:${port}`;
+        res.json({
+            issuer: baseUrl,
+            authorization_endpoint: `${baseUrl}/oauth/authorize`,
+            token_endpoint: `${baseUrl}/oauth/token`,
+            response_types_supported: ['code'],
+            grant_types_supported: ['authorization_code'],
+            code_challenge_methods_supported: ['S256']
+        });
+    });
+
     // MCP endpoint - HTTP streaming only
     app.post('/mcp', async (req, res) => {
         const sessionId = req.headers['mcp-session-id'];
