@@ -265,7 +265,14 @@ export function addEntry(projectName, minutes, description, type = 'commit', bil
     database.prepare('UPDATE projects SET total_minutes = total_minutes + ? WHERE id = ?')
         .run(minutes, project.id);
 
-    return { id, project: project.id, minutes, description, type, billable, createdAt };
+    const entry = { id, project: project.id, minutes, description, type, billable, userId, createdAt };
+
+    // Index in ChromaDB for semantic search (async, non-blocking)
+    import('./memory.js').then(({ indexEntry }) => {
+        indexEntry(entry).catch(() => {});
+    }).catch(() => {});
+
+    return entry;
 }
 
 export function getProjectEntries(projectId) {
@@ -290,6 +297,11 @@ export function deleteEntry(entryId) {
         .run(entry.minutes, entry.project_id);
 
     database.prepare('DELETE FROM entries WHERE id = ?').run(entryId);
+
+    // Remove from ChromaDB (async, non-blocking)
+    import('./memory.js').then(({ deleteEntryFromChroma }) => {
+        deleteEntryFromChroma(entryId).catch(() => {});
+    }).catch(() => {});
 
     return entry;
 }
