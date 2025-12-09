@@ -1064,14 +1064,16 @@ async function main() {
 
     // Bearer auth middleware for protected endpoints
     const bearerAuthMiddleware = requireBearerAuth({
-        verifyAccessToken: async (token) => {
-            try {
-                const result = await oauthProvider.verifyAccessToken(token);
-                console.log('Token verified for user:', result.userId);
-                return result;
-            } catch (error) {
-                console.error('Token verification failed:', error.message);
-                throw error;
+        verifier: {
+            verifyAccessToken: async (token) => {
+                try {
+                    const result = await oauthProvider.verifyAccessToken(token);
+                    console.log('Token verified for user:', result.userId);
+                    return result;
+                } catch (error) {
+                    console.error('Token verification failed:', error.message);
+                    throw error;
+                }
             }
         }
     });
