@@ -57,22 +57,38 @@ async function getEntriesCollection() {
 }
 
 /**
- * Store a memory in ChromaDB and SQLite
+ * Store a memory in ChromaDB and PostgreSQL
  * @param {string} content - Memory content
- * @param {Object} options - Optional settings
+ * @param {Object} options - Optional settings including userId, project, client
  * @returns {Object} The created memory
  */
 export async function storeMemory(content, options = {}) {
     const collection = await getMemoriesCollection();
-    const currentUser = process.env.CALQ_USER || 'unknown';
+
+    // Require userId - must be passed from authenticated context
+    if (!options.userId) {
+        throw new Error('userId is required to store memories');
+    }
+
+    // Resolve project ID if project name provided
+    let projectId = null;
+    if (options.project) {
+        projectId = options.project.toLowerCase().trim().replace(/\s+/g, '-');
+    }
+
+    // Resolve client ID if client name provided
+    let clientId = null;
+    if (options.client) {
+        clientId = options.client.toLowerCase().trim().replace(/\s+/g, '-');
+    }
 
     const id = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
     const metadata = {
         category: options.category || '',
         shared: options.shared !== false,
-        projectId: options.project ? options.project.toLowerCase().trim() : '',
-        clientId: options.client ? options.client.toLowerCase().trim().replace(/\s+/g, '-') : '',
-        user: currentUser,
+        projectId: projectId || '',
+        clientId: clientId || '',
+        user: options.userId,
         createdAt: new Date().toISOString()
     };
 
