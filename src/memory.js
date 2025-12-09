@@ -57,7 +57,7 @@ async function getEntriesCollection() {
 }
 
 /**
- * Store a memory in ChromaDB and PostgreSQL
+ * Store a memory in ChromaDB and SQLite
  * @param {string} content - Memory content
  * @param {Object} options - Optional settings
  * @returns {Object} The created memory
@@ -88,8 +88,8 @@ export async function storeMemory(content, options = {}) {
         // Continue to save in DB even if vector store fails
     }
 
-    // Store in PostgreSQL
-    return await saveMemory(id, content, metadata);
+    // Store in SQLite
+    return saveMemory(id, content, metadata);
 }
 
 /**
@@ -146,16 +146,16 @@ export async function searchMemories(query, options = {}) {
         }));
     } catch (error) {
         console.error('ChromaDB search error:', error.message);
-        // Fallback to PostgreSQL search
-        return await fallbackSearchMemories(query, options);
+        // Fallback to SQLite search
+        return fallbackSearchMemories(query, options);
     }
 }
 
 /**
- * Fallback search using PostgreSQL LIKE
+ * Fallback search using SQLite LIKE
  */
-async function fallbackSearchMemories(query, options = {}) {
-    const memories = await getAllMemories(options);
+function fallbackSearchMemories(query, options = {}) {
+    const memories = getAllMemories(options);
     const queryLower = query.toLowerCase();
 
     return memories
@@ -251,8 +251,8 @@ export async function searchEntries(query, limit = 10) {
  * @returns {Object|null} Deleted memory or null
  */
 export async function deleteMemory(memoryId) {
-    // Delete from PostgreSQL
-    const deleted = await deleteMemoryFromDb(memoryId);
+    // Delete from SQLite
+    const deleted = deleteMemoryFromDb(memoryId);
 
     if (deleted) {
         // Also delete from ChromaDB
@@ -272,6 +272,6 @@ export async function deleteMemory(memoryId) {
  * @param {Object} options - Filter options
  * @returns {Object[]} Filtered memories
  */
-export async function getAllMemories(options = {}) {
-    return await getMemories(options);
+export function getAllMemories(options = {}) {
+    return getMemories(options);
 }

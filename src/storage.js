@@ -1,5 +1,126 @@
-import { eq, and, or, like, ilike, sql, desc, gte } from 'drizzle-orm';
-import { db, users, clients, projects, entries, memories, activeTimer } from './db/index.js';
+import Database from 'better-sqlite3';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+
+// Data directory
+const DATA_DIR = process.env.CALQ_DATA_DIR || path.join(os.homedir(), '.calq');
+const DB_PATH = path.join(DATA_DIR, 'calq.db');
+
+// Ensure data directory exists
+if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+// Initialize database
+let db = null;
+
+function getDb() {
+    if (!db) {
+        db = new Database(DB_PATH);
+        db.pragma('journal_mode = WAL');
+        initSchema();
+    }
+    return db;
+}
+
+function initSchema() {
+    const database = db;
+
+    // Users table
+    database.exec(`
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            email TEXT,
+            role TEXT DEFAULT 'member',
+            github_id TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            last_login TEXT
+        )
+    `);
+
+    // Clients table
+    database.exec(`
+        CREATE TABLE IF NOT EXISTS clients (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            email TEXT,
+            notes TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+
+    // Projects table
+    database.exec(`
+        CREATE TABLE IF NOT EXISTS projects (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            client_id TEXT,
+            hourly_rate REAL DEFAULT 0,
+            notes TEXT,
+            total_minutes INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (client_id) REFERENCES clients(id)
+        )
+    `);
+
+    // Entries table
+    database.exec(`
+        CREATE TABLE IF NOT EXISTS entries (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            minutes INTEGER NOT NULL,
+            description TEXT,
+            type TEXT DEFAULT 'commit',
+            billable INTEGER DEFAULT 1,
+            billed INTEGER DEFAULT 0,
+            user_id TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (project_id) REFERENCES projects(id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    `);
+
+    // Memories table (metadata only - vectors in ChromaDB)
+    database.exec(`
+        CREATE TABLE IF NOT EXISTS memories (
+            id TEXT PRIMARY KEY,
+            content TEXT NOT NULL,
+            category TEXT,
+            shared INTEGER DEFAULT 1,
+            project_id TEXT,
+            client_id TEXT,
+            user_id TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (project_id) REFERENCES projects(id),
+            FOREIGN KEY (client_id) REFERENCES clients(id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    `);
+
+    // Active timer table (one per user)
+    database.exec(`
+        CREATE TABLE IF NOT EXISTS active_timer (
+            user_id TEXT PRIMARY KEY,
+            project_id TEXT,
+            description TEXT,
+            started_at TEXT,
+            FOREIGN KEY (project_id) REFERENCES projects(id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    `);
+
+    // Create indexes
+    database.exec(`
+        CREATE INDEX IF NOT EXISTS idx_entries_project ON entries(project_id);
+        CREATE INDEX IF NOT EXISTS idx_entries_user ON entries(user_id);
+        CREATE INDEX IF NOT EXISTS idx_entries_created ON entries(created_at);
+        CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
+        CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
+        CREATE INDEX IF NOT EXISTS idx_projects_client ON projects(client_id);
+    `);
+}
 
 // ==================== HELPER FUNCTIONS ====================
 
@@ -20,160 +141,131 @@ function getCurrentUser() {
 
 // ==================== PROJECT FUNCTIONS ====================
 
-export async function getOrCreateProject(projectName) {
+export function getOrCreateProject(projectName) {
+    const database = getDb();
     const id = projectName.toLowerCase().trim().replace(/\s+/g, '-');
 
-    const [project] = await db.select().from(projects).where(eq(projects.id, id)).limit(1);
+    let project = database.prepare('SELECT * FROM projects WHERE id = ?').get(id);
 
     if (!project) {
-        await db.insert(projects).values({
-            id,
-            name: projectName,
-            totalMinutes: 0,
-        });
-        return { id, name: projectName, totalMinutes: 0 };
+        database.prepare(`
+            INSERT INTO projects (id, name, total_minutes) VALUES (?, ?, 0)
+        `).run(id, projectName);
+        project = { id, name: projectName, total_minutes: 0 };
     }
 
     return project;
 }
 
-export async function getProjects() {
-    const result = await db
-        .select({
-            id: projects.id,
-            name: projects.name,
-            clientId: projects.clientId,
-            hourlyRate: projects.hourlyRate,
-            notes: projects.notes,
-            totalMinutes: projects.totalMinutes,
-            createdAt: projects.createdAt,
-            clientName: clients.name,
-        })
-        .from(projects)
-        .leftJoin(clients, eq(projects.clientId, clients.id))
-        .orderBy(desc(projects.totalMinutes));
-
-    return result.map(p => ({
-        ...p,
-        total_minutes: p.totalMinutes,
-        totalFormatted: formatDuration(p.totalMinutes || 0),
-    }));
+export function getProjects() {
+    const database = getDb();
+    return database.prepare(`
+        SELECT p.*, c.name as client_name 
+        FROM projects p 
+        LEFT JOIN clients c ON p.client_id = c.id
+        ORDER BY p.total_minutes DESC
+    `).all();
 }
 
-export async function getProjectsWithClients(clientFilter = null) {
-    let query = db
-        .select({
-            id: projects.id,
-            name: projects.name,
-            clientId: projects.clientId,
-            hourlyRate: projects.hourlyRate,
-            notes: projects.notes,
-            totalMinutes: projects.totalMinutes,
-            createdAt: projects.createdAt,
-            clientName: clients.name,
-        })
-        .from(projects)
-        .leftJoin(clients, eq(projects.clientId, clients.id));
+export function getProjectsWithClients(clientFilter = null) {
+    const database = getDb();
+    let query = `
+        SELECT p.*, c.name as client_name,
+               (p.total_minutes / 60.0) * p.hourly_rate as estimated_value
+        FROM projects p 
+        LEFT JOIN clients c ON p.client_id = c.id
+    `;
 
     if (clientFilter) {
-        query = query.where(ilike(clients.name, `%${clientFilter}%`));
+        query += ` WHERE c.name LIKE ?`;
+        const projects = database.prepare(query).all(`%${clientFilter}%`);
+        return projects.map(p => ({
+            ...p,
+            totalFormatted: formatDuration(p.total_minutes),
+            estimatedValue: p.estimated_value ? p.estimated_value.toFixed(2) : null
+        }));
     }
 
-    const result = await query;
-
-    return result.map(p => ({
+    const projects = database.prepare(query).all();
+    return projects.map(p => ({
         ...p,
-        total_minutes: p.totalMinutes,
-        totalFormatted: formatDuration(p.totalMinutes || 0),
-        estimatedValue: p.hourlyRate ? (((p.totalMinutes || 0) / 60) * p.hourlyRate).toFixed(2) : null,
+        totalFormatted: formatDuration(p.total_minutes),
+        estimatedValue: p.estimated_value ? p.estimated_value.toFixed(2) : null
     }));
 }
 
-export async function createProject(name, clientName = null, hourlyRate = 0, notes = '') {
+export function createProject(name, clientName = null, hourlyRate = 0, notes = '') {
+    const database = getDb();
     const id = name.toLowerCase().trim().replace(/\s+/g, '-');
 
     let clientId = null;
     if (clientName) {
-        const [client] = await db
-            .select({ id: clients.id })
-            .from(clients)
-            .where(ilike(clients.name, `%${clientName}%`))
-            .limit(1);
+        const client = database.prepare('SELECT id FROM clients WHERE name LIKE ?').get(`%${clientName}%`);
         if (client) clientId = client.id;
     }
 
-    const [existing] = await db.select().from(projects).where(eq(projects.id, id)).limit(1);
+    const existing = database.prepare('SELECT * FROM projects WHERE id = ?').get(id);
 
     if (existing) {
-        await db
-            .update(projects)
-            .set({ clientId, hourlyRate, notes })
-            .where(eq(projects.id, id));
+        database.prepare(`
+            UPDATE projects SET client_id = ?, hourly_rate = ?, notes = ? WHERE id = ?
+        `).run(clientId, hourlyRate, notes, id);
     } else {
-        await db.insert(projects).values({
-            id,
-            name,
-            clientId,
-            hourlyRate,
-            notes,
-        });
+        database.prepare(`
+            INSERT INTO projects (id, name, client_id, hourly_rate, notes) VALUES (?, ?, ?, ?, ?)
+        `).run(id, name, clientId, hourlyRate, notes);
     }
 
-    const [project] = await db.select().from(projects).where(eq(projects.id, id)).limit(1);
-    return project;
+    return database.prepare('SELECT * FROM projects WHERE id = ?').get(id);
 }
 
-export async function updateProject(projectId, updates) {
-    const setValues = {};
-    if (updates.name !== undefined) setValues.name = updates.name;
-    if (updates.clientId !== undefined) setValues.clientId = updates.clientId;
-    if (updates.hourlyRate !== undefined) setValues.hourlyRate = updates.hourlyRate;
-    if (updates.notes !== undefined) setValues.notes = updates.notes;
+export function updateProject(projectId, updates) {
+    const database = getDb();
+    const sets = [];
+    const values = [];
 
-    if (Object.keys(setValues).length > 0) {
-        await db.update(projects).set(setValues).where(eq(projects.id, projectId));
+    if (updates.name !== undefined) { sets.push('name = ?'); values.push(updates.name); }
+    if (updates.clientId !== undefined) { sets.push('client_id = ?'); values.push(updates.clientId); }
+    if (updates.hourlyRate !== undefined) { sets.push('hourly_rate = ?'); values.push(updates.hourlyRate); }
+    if (updates.notes !== undefined) { sets.push('notes = ?'); values.push(updates.notes); }
+
+    if (sets.length > 0) {
+        values.push(projectId);
+        database.prepare(`UPDATE projects SET ${sets.join(', ')} WHERE id = ?`).run(...values);
     }
 
-    const [project] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
-    return project;
+    return database.prepare('SELECT * FROM projects WHERE id = ?').get(projectId);
 }
 
 // ==================== ENTRY FUNCTIONS ====================
 
-export async function addEntry(projectName, minutes, description, type = 'commit', billable = true, date = null, userId = null) {
-    const project = await getOrCreateProject(projectName);
+export function addEntry(projectName, minutes, description, type = 'commit', billable = true, date = null, userId = null) {
+    const database = getDb();
+    const project = getOrCreateProject(projectName);
     const id = generateId();
     const user = userId || getCurrentUser();
 
     let createdAt;
     if (date) {
         if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-            createdAt = new Date(date + 'T12:00:00.000Z');
+            createdAt = date + 'T12:00:00.000Z';
         } else {
-            createdAt = new Date(date);
+            createdAt = new Date(date).toISOString();
         }
     } else {
-        createdAt = new Date();
+        createdAt = new Date().toISOString();
     }
 
-    await db.insert(entries).values({
-        id,
-        projectId: project.id,
-        minutes,
-        description,
-        type,
-        billable,
-        userId: user,
-        createdAt,
-    });
+    database.prepare(`
+        INSERT INTO entries (id, project_id, minutes, description, type, billable, user_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, project.id, minutes, description, type, billable ? 1 : 0, user, createdAt);
 
     // Update project total
-    await db
-        .update(projects)
-        .set({ totalMinutes: sql`${projects.totalMinutes} + ${minutes}` })
-        .where(eq(projects.id, project.id));
+    database.prepare('UPDATE projects SET total_minutes = total_minutes + ? WHERE id = ?')
+        .run(minutes, project.id);
 
-    const entry = { id, project: project.id, minutes, description, type, billable, userId: user, createdAt: createdAt.toISOString() };
+    const entry = { id, project: project.id, minutes, description, type, billable, userId: user, createdAt };
 
     // Index in ChromaDB for semantic search (async, non-blocking)
     import('./memory.js').then(({ indexEntry }) => {
@@ -183,132 +275,98 @@ export async function addEntry(projectName, minutes, description, type = 'commit
     return entry;
 }
 
-export async function getProjectEntries(projectId, limit = 10) {
-    const result = await db
-        .select({
-            id: entries.id,
-            projectId: entries.projectId,
-            minutes: entries.minutes,
-            description: entries.description,
-            type: entries.type,
-            billable: entries.billable,
-            billed: entries.billed,
-            userId: entries.userId,
-            createdAt: entries.createdAt,
-            username: users.username,
-        })
-        .from(entries)
-        .leftJoin(users, eq(entries.userId, users.id))
-        .where(eq(entries.projectId, projectId.toLowerCase().trim().replace(/\s+/g, '-')))
-        .orderBy(desc(entries.createdAt))
-        .limit(limit);
-
-    return result.map(e => ({
-        ...e,
-        durationFormatted: formatDuration(e.minutes),
-    }));
+export function getProjectEntries(projectId) {
+    const database = getDb();
+    return database.prepare(`
+        SELECT e.*, u.username 
+        FROM entries e 
+        LEFT JOIN users u ON e.user_id = u.id
+        WHERE e.project_id = ? 
+        ORDER BY e.created_at DESC
+    `).all(projectId);
 }
 
-export async function deleteEntry(entryId) {
-    // If no entryId, get the last entry
-    let entry;
-    if (!entryId) {
-        [entry] = await db.select().from(entries).orderBy(desc(entries.createdAt)).limit(1);
-    } else {
-        [entry] = await db.select().from(entries).where(eq(entries.id, entryId)).limit(1);
-    }
+export function deleteEntry(entryId) {
+    const database = getDb();
+    const entry = database.prepare('SELECT * FROM entries WHERE id = ?').get(entryId);
 
     if (!entry) return null;
 
     // Update project total
-    await db
-        .update(projects)
-        .set({ totalMinutes: sql`${projects.totalMinutes} - ${entry.minutes}` })
-        .where(eq(projects.id, entry.projectId));
+    database.prepare('UPDATE projects SET total_minutes = total_minutes - ? WHERE id = ?')
+        .run(entry.minutes, entry.project_id);
 
-    await db.delete(entries).where(eq(entries.id, entry.id));
+    database.prepare('DELETE FROM entries WHERE id = ?').run(entryId);
 
     // Remove from ChromaDB (async, non-blocking)
     import('./memory.js').then(({ deleteEntryFromChroma }) => {
-        deleteEntryFromChroma(entry.id).catch(() => {});
+        deleteEntryFromChroma(entryId).catch(() => {});
     }).catch(() => {});
 
-    return { ...entry, project: entry.projectId };
+    return entry;
 }
 
-export async function editEntry(entryId, updates) {
-    const [entry] = await db.select().from(entries).where(eq(entries.id, entryId)).limit(1);
+export function editEntry(entryId, updates) {
+    const database = getDb();
+    const entry = database.prepare('SELECT * FROM entries WHERE id = ?').get(entryId);
 
     if (!entry) return null;
 
-    const setValues = {};
+    const sets = [];
+    const values = [];
     let minutesDiff = 0;
 
     if (updates.minutes !== undefined) {
         minutesDiff = updates.minutes - entry.minutes;
-        setValues.minutes = updates.minutes;
+        sets.push('minutes = ?');
+        values.push(updates.minutes);
     }
-    if (updates.description !== undefined) setValues.description = updates.description;
-    if (updates.billable !== undefined) setValues.billable = updates.billable;
-    if (updates.billed !== undefined) setValues.billed = updates.billed;
+    if (updates.description !== undefined) { sets.push('description = ?'); values.push(updates.description); }
+    if (updates.billable !== undefined) { sets.push('billable = ?'); values.push(updates.billable ? 1 : 0); }
+    if (updates.billed !== undefined) { sets.push('billed = ?'); values.push(updates.billed ? 1 : 0); }
 
-    if (Object.keys(setValues).length > 0) {
-        await db.update(entries).set(setValues).where(eq(entries.id, entryId));
+    if (sets.length > 0) {
+        values.push(entryId);
+        database.prepare(`UPDATE entries SET ${sets.join(', ')} WHERE id = ?`).run(...values);
 
         if (minutesDiff !== 0) {
-            await db
-                .update(projects)
-                .set({ totalMinutes: sql`${projects.totalMinutes} + ${minutesDiff}` })
-                .where(eq(projects.id, entry.projectId));
+            database.prepare('UPDATE projects SET total_minutes = total_minutes + ? WHERE id = ?')
+                .run(minutesDiff, entry.project_id);
         }
     }
 
-    const [updated] = await db.select().from(entries).where(eq(entries.id, entryId)).limit(1);
-    return { ...updated, project: updated.projectId };
+    return database.prepare('SELECT * FROM entries WHERE id = ?').get(entryId);
 }
 
-export async function getLastEntry() {
-    const [entry] = await db.select().from(entries).orderBy(desc(entries.createdAt)).limit(1);
-    return entry;
+export function getLastEntry() {
+    const database = getDb();
+    return database.prepare('SELECT * FROM entries ORDER BY created_at DESC LIMIT 1').get();
 }
 
 // ==================== SUMMARY FUNCTIONS ====================
 
-export async function getTodaySummary(userId = null) {
+export function getTodaySummary(userId = null) {
+    const database = getDb();
     const today = new Date().toISOString().split('T')[0];
     const user = userId || getCurrentUser();
 
-    const result = await db
-        .select({
-            id: entries.id,
-            projectId: entries.projectId,
-            minutes: entries.minutes,
-            description: entries.description,
-            type: entries.type,
-            billable: entries.billable,
-            billed: entries.billed,
-            createdAt: entries.createdAt,
-            projectName: projects.name,
-        })
-        .from(entries)
-        .innerJoin(projects, eq(entries.projectId, projects.id))
-        .where(
-            and(
-                sql`date(${entries.createdAt}) = ${today}`,
-                eq(entries.userId, user)
-            )
-        )
-        .orderBy(desc(entries.createdAt));
+    const entries = database.prepare(`
+        SELECT e.*, p.name as project_name
+        FROM entries e
+        JOIN projects p ON e.project_id = p.id
+        WHERE date(e.created_at) = date(?) AND e.user_id = ?
+        ORDER BY e.created_at DESC
+    `).all(today, user);
 
     const projectSummary = {};
     let totalMinutes = 0;
 
-    for (const entry of result) {
-        if (!projectSummary[entry.projectId]) {
-            projectSummary[entry.projectId] = { name: entry.projectName, minutes: 0, entries: [] };
+    for (const entry of entries) {
+        if (!projectSummary[entry.project_id]) {
+            projectSummary[entry.project_id] = { name: entry.project_name, minutes: 0, entries: [] };
         }
-        projectSummary[entry.projectId].minutes += entry.minutes;
-        projectSummary[entry.projectId].entries.push(entry);
+        projectSummary[entry.project_id].minutes += entry.minutes;
+        projectSummary[entry.project_id].entries.push(entry);
         totalMinutes += entry.minutes;
     }
 
@@ -321,86 +379,64 @@ export async function getTodaySummary(userId = null) {
             name: data.name,
             minutes: data.minutes,
             durationFormatted: formatDuration(data.minutes),
-            entries: data.entries,
-        })),
+            entries: data.entries
+        }))
     };
 }
 
-export async function getWeeklySummary(userId = null) {
+export function getWeeklySummary(userId = null) {
+    const database = getDb();
     const user = userId || getCurrentUser();
     const weekAgo = new Date();
     weekAgo.setDate(weekAgo.getDate() - 7);
-    const weekAgoStr = weekAgo.toISOString().split('T')[0];
 
-    const result = await db
-        .select({
-            day: sql`date(${entries.createdAt})`.as('day'),
-            total: sql`sum(${entries.minutes})`.as('total'),
-        })
-        .from(entries)
-        .where(
-            and(
-                sql`date(${entries.createdAt}) >= ${weekAgoStr}`,
-                eq(entries.userId, user)
-            )
-        )
-        .groupBy(sql`date(${entries.createdAt})`)
-        .orderBy(sql`date(${entries.createdAt})`);
+    const entries = database.prepare(`
+        SELECT date(created_at) as day, SUM(minutes) as total
+        FROM entries
+        WHERE date(created_at) >= date(?) AND user_id = ?
+        GROUP BY date(created_at)
+        ORDER BY day
+    `).all(weekAgo.toISOString().split('T')[0], user);
 
     let totalMinutes = 0;
-    const days = result.map(e => {
-        const dayTotal = Number(e.total) || 0;
-        totalMinutes += dayTotal;
+    const days = entries.map(e => {
+        totalMinutes += e.total;
         return {
             date: e.day,
-            minutes: dayTotal,
-            durationFormatted: formatDuration(dayTotal),
+            minutes: e.total,
+            durationFormatted: formatDuration(e.total)
         };
     });
 
     return {
-        weekStart: weekAgoStr,
+        weekStart: weekAgo.toISOString().split('T')[0],
         totalMinutes,
         totalFormatted: formatDuration(totalMinutes),
-        days,
+        days
     };
 }
 
-export async function getUnbilledSummary(userId = null) {
+export function getUnbilledSummary(userId = null) {
+    const database = getDb();
     const user = userId || getCurrentUser();
 
-    const result = await db
-        .select({
-            id: entries.id,
-            projectId: entries.projectId,
-            minutes: entries.minutes,
-            description: entries.description,
-            type: entries.type,
-            billable: entries.billable,
-            billed: entries.billed,
-            createdAt: entries.createdAt,
-            projectName: projects.name,
-        })
-        .from(entries)
-        .innerJoin(projects, eq(entries.projectId, projects.id))
-        .where(
-            and(
-                eq(entries.billable, true),
-                eq(entries.billed, false),
-                eq(entries.userId, user)
-            )
-        );
+    const entries = database.prepare(`
+        SELECT e.*, p.name as project_name
+        FROM entries e
+        JOIN projects p ON e.project_id = p.id
+        WHERE e.billable = 1 AND e.billed = 0 AND e.user_id = ?
+    `).all(user);
 
     const projectSummary = {};
     let totalMinutes = 0;
 
-    for (const entry of result) {
-        if (!projectSummary[entry.projectId]) {
-            projectSummary[entry.projectId] = { name: entry.projectName, minutes: 0, count: 0, entries: [] };
+    for (const entry of entries) {
+        if (!projectSummary[entry.project_id]) {
+            projectSummary[entry.project_id] = { name: entry.project_name, minutes: 0, count: 0, entries: [] };
         }
-        projectSummary[entry.projectId].minutes += entry.minutes;
-        projectSummary[entry.projectId].count++;
-        projectSummary[entry.projectId].entries.push(entry);
+        projectSummary[entry.project_id].minutes += entry.minutes;
+        projectSummary[entry.project_id].count++;
+        projectSummary[entry.project_id].entries.push(entry);
         totalMinutes += entry.minutes;
     }
 
@@ -413,67 +449,53 @@ export async function getUnbilledSummary(userId = null) {
             minutes: data.minutes,
             durationFormatted: formatDuration(data.minutes),
             entryCount: data.count,
-            entries: data.entries,
-        })),
+            entries: data.entries
+        }))
     };
 }
 
-export async function getUnbilledByClient(userId = null) {
+export function getUnbilledByClient(userId = null) {
+    const database = getDb();
     const user = userId || getCurrentUser();
 
-    const result = await db
-        .select({
-            id: entries.id,
-            projectId: entries.projectId,
-            minutes: entries.minutes,
-            description: entries.description,
-            createdAt: entries.createdAt,
-            projectName: projects.name,
-            hourlyRate: projects.hourlyRate,
-            clientId: clients.id,
-            clientName: clients.name,
-        })
-        .from(entries)
-        .innerJoin(projects, eq(entries.projectId, projects.id))
-        .leftJoin(clients, eq(projects.clientId, clients.id))
-        .where(
-            and(
-                eq(entries.billable, true),
-                eq(entries.billed, false),
-                eq(entries.userId, user)
-            )
-        );
+    const entries = database.prepare(`
+        SELECT e.*, p.name as project_name, p.hourly_rate, c.id as client_id, c.name as client_name
+        FROM entries e
+        JOIN projects p ON e.project_id = p.id
+        LEFT JOIN clients c ON p.client_id = c.id
+        WHERE e.billable = 1 AND e.billed = 0 AND e.user_id = ?
+    `).all(user);
 
     const clientSummary = {};
     let totalMinutes = 0;
     let totalValue = 0;
 
-    for (const entry of result) {
-        const clientId = entry.clientId || 'no-client';
-        const clientName = entry.clientName || 'No Client';
+    for (const entry of entries) {
+        const clientId = entry.client_id || 'no-client';
+        const clientName = entry.client_name || 'No Client';
 
         if (!clientSummary[clientId]) {
             clientSummary[clientId] = {
                 clientName,
                 minutes: 0,
                 value: 0,
-                projects: {},
+                projects: {}
             };
         }
 
-        if (!clientSummary[clientId].projects[entry.projectId]) {
-            clientSummary[clientId].projects[entry.projectId] = {
-                projectName: entry.projectName,
-                hourlyRate: entry.hourlyRate || 0,
-                minutes: 0,
+        if (!clientSummary[clientId].projects[entry.project_id]) {
+            clientSummary[clientId].projects[entry.project_id] = {
+                projectName: entry.project_name,
+                hourlyRate: entry.hourly_rate || 0,
+                minutes: 0
             };
         }
 
         clientSummary[clientId].minutes += entry.minutes;
-        clientSummary[clientId].projects[entry.projectId].minutes += entry.minutes;
+        clientSummary[clientId].projects[entry.project_id].minutes += entry.minutes;
 
         const hours = entry.minutes / 60;
-        const value = hours * (entry.hourlyRate || 0);
+        const value = hours * (entry.hourly_rate || 0);
         clientSummary[clientId].value += value;
         totalValue += value;
         totalMinutes += entry.minutes;
@@ -497,287 +519,277 @@ export async function getUnbilledByClient(userId = null) {
                 minutes: pdata.minutes,
                 durationFormatted: formatDuration(pdata.minutes),
                 value: (pdata.minutes / 60) * pdata.hourlyRate,
-                valueFormatted: ((pdata.minutes / 60) * pdata.hourlyRate).toFixed(2),
-            })),
-        })),
+                valueFormatted: ((pdata.minutes / 60) * pdata.hourlyRate).toFixed(2)
+            }))
+        }))
     };
 }
 
 // ==================== TIMER FUNCTIONS ====================
 
-export async function startTimer(projectName, description = '', userId = null) {
-    const project = await getOrCreateProject(projectName);
+export function startTimer(projectName, description = '', userId = null) {
+    const database = getDb();
+    const project = getOrCreateProject(projectName);
     const user = userId || getCurrentUser();
 
-    const [existing] = await db.select().from(activeTimer).where(eq(activeTimer.userId, user)).limit(1);
-    if (existing && existing.projectId) {
+    const existing = database.prepare('SELECT * FROM active_timer WHERE user_id = ?').get(user);
+    if (existing && existing.project_id) {
         return { error: 'Timer already running', timer: existing };
     }
 
-    await db
-        .insert(activeTimer)
-        .values({
-            userId: user,
-            projectId: project.id,
-            description,
-            startedAt: new Date(),
-        })
-        .onConflictDoUpdate({
-            target: activeTimer.userId,
-            set: {
-                projectId: project.id,
-                description,
-                startedAt: new Date(),
-            },
-        });
+    database.prepare(`
+        INSERT OR REPLACE INTO active_timer (user_id, project_id, description, started_at)
+        VALUES (?, ?, ?, ?)
+    `).run(user, project.id, description, new Date().toISOString());
 
     return { project: project.id, projectName: project.name, description, startedAt: new Date() };
 }
 
-export async function stopTimer(message = null, billable = true, userId = null) {
+export function stopTimer(message = null, billable = true, userId = null) {
+    const database = getDb();
     const user = userId || getCurrentUser();
-    const [timer] = await db.select().from(activeTimer).where(eq(activeTimer.userId, user)).limit(1);
+    const timer = database.prepare('SELECT * FROM active_timer WHERE user_id = ?').get(user);
 
-    if (!timer || !timer.projectId) {
+    if (!timer || !timer.project_id) {
         return { error: 'No timer running' };
     }
 
-    const startedAt = new Date(timer.startedAt);
+    const startedAt = new Date(timer.started_at);
     const minutes = Math.round((Date.now() - startedAt.getTime()) / 60000);
 
-    const entry = await addEntry(timer.projectId, minutes, message || timer.description || 'Timer session', 'timer', billable, null, user);
+    const entry = addEntry(timer.project_id, minutes, message || timer.description || 'Timer session', 'timer', billable, null, user);
 
-    await db.delete(activeTimer).where(eq(activeTimer.userId, user));
+    database.prepare('DELETE FROM active_timer WHERE user_id = ?').run(user);
 
     return {
         entry,
         minutes,
         duration: formatDuration(minutes),
-        startedAt: timer.startedAt,
+        startedAt: timer.started_at
     };
 }
 
-export async function getActiveTimer(userId = null) {
+export function getActiveTimer(userId = null) {
+    const database = getDb();
     const user = userId || getCurrentUser();
+    const timer = database.prepare(`
+        SELECT t.*, p.name as project_name
+        FROM active_timer t
+        LEFT JOIN projects p ON t.project_id = p.id
+        WHERE t.user_id = ?
+    `).get(user);
 
-    const result = await db
-        .select({
-            userId: activeTimer.userId,
-            projectId: activeTimer.projectId,
-            description: activeTimer.description,
-            startedAt: activeTimer.startedAt,
-            projectName: projects.name,
-        })
-        .from(activeTimer)
-        .leftJoin(projects, eq(activeTimer.projectId, projects.id))
-        .where(eq(activeTimer.userId, user))
-        .limit(1);
+    if (!timer || !timer.project_id) return null;
 
-    const [timer] = result;
-    if (!timer || !timer.projectId) return null;
-
-    const startedAt = new Date(timer.startedAt);
+    const startedAt = new Date(timer.started_at);
     const minutes = Math.round((Date.now() - startedAt.getTime()) / 60000);
 
     return {
-        project: timer.projectId,
-        projectName: timer.projectName,
+        project: timer.project_id,
+        projectName: timer.project_name,
         description: timer.description,
-        startedAt: timer.startedAt,
+        startedAt: timer.started_at,
         runningMinutes: minutes,
-        runningFormatted: formatDuration(minutes),
-        elapsedFormatted: formatDuration(minutes),
+        runningFormatted: formatDuration(minutes)
     };
 }
 
-export async function cancelTimer(userId = null) {
+export function cancelTimer(userId = null) {
+    const database = getDb();
     const user = userId || getCurrentUser();
-    const [timer] = await db.select().from(activeTimer).where(eq(activeTimer.userId, user)).limit(1);
+    const timer = database.prepare('SELECT * FROM active_timer WHERE user_id = ?').get(user);
 
-    if (!timer || !timer.projectId) {
+    if (!timer || !timer.project_id) {
         return { error: 'No timer running' };
     }
 
-    await db.delete(activeTimer).where(eq(activeTimer.userId, user));
+    database.prepare('DELETE FROM active_timer WHERE user_id = ?').run(user);
 
-    return { cancelled: true, project: timer.projectId };
+    return { cancelled: true, project: timer.project_id };
 }
 
 // ==================== CLIENT FUNCTIONS ====================
 
-export async function createClient(name, email = '', notes = '') {
+export function createClient(name, email = '', notes = '') {
+    const database = getDb();
     const id = name.toLowerCase().trim().replace(/\s+/g, '-');
 
-    const [existing] = await db.select().from(clients).where(eq(clients.id, id)).limit(1);
+    const existing = database.prepare('SELECT * FROM clients WHERE id = ?').get(id);
     if (existing) {
         return { error: 'Client already exists', client: existing };
     }
 
-    await db.insert(clients).values({
-        id,
-        name,
-        email,
-        notes,
-    });
+    database.prepare(`
+        INSERT INTO clients (id, name, email, notes) VALUES (?, ?, ?, ?)
+    `).run(id, name, email, notes);
 
-    const [client] = await db.select().from(clients).where(eq(clients.id, id)).limit(1);
-    return client;
+    return database.prepare('SELECT * FROM clients WHERE id = ?').get(id);
 }
 
-export async function getClients() {
-    return await db.select().from(clients).orderBy(clients.name);
+export function getClients() {
+    const database = getDb();
+    return database.prepare('SELECT * FROM clients ORDER BY name').all();
 }
 
-export async function updateClient(clientId, updates) {
-    const setValues = {};
-    if (updates.name !== undefined) setValues.name = updates.name;
-    if (updates.email !== undefined) setValues.email = updates.email;
-    if (updates.notes !== undefined) setValues.notes = updates.notes;
+export function updateClient(clientId, updates) {
+    const database = getDb();
+    const sets = [];
+    const values = [];
 
-    if (Object.keys(setValues).length > 0) {
-        await db.update(clients).set(setValues).where(eq(clients.id, clientId));
+    if (updates.name !== undefined) { sets.push('name = ?'); values.push(updates.name); }
+    if (updates.email !== undefined) { sets.push('email = ?'); values.push(updates.email); }
+    if (updates.notes !== undefined) { sets.push('notes = ?'); values.push(updates.notes); }
+
+    if (sets.length > 0) {
+        values.push(clientId);
+        database.prepare(`UPDATE clients SET ${sets.join(', ')} WHERE id = ?`).run(...values);
     }
 
-    const [client] = await db.select().from(clients).where(eq(clients.id, clientId)).limit(1);
-    return client;
+    return database.prepare('SELECT * FROM clients WHERE id = ?').get(clientId);
 }
 
-export async function deleteClient(clientId) {
-    const [client] = await db.select().from(clients).where(eq(clients.id, clientId)).limit(1);
+export function deleteClient(clientId) {
+    const database = getDb();
+    const client = database.prepare('SELECT * FROM clients WHERE id = ?').get(clientId);
 
     if (!client) return null;
 
     // Unlink projects from this client
-    await db.update(projects).set({ clientId: null }).where(eq(projects.clientId, clientId));
-    await db.delete(clients).where(eq(clients.id, clientId));
+    database.prepare('UPDATE projects SET client_id = NULL WHERE client_id = ?').run(clientId);
+    database.prepare('DELETE FROM clients WHERE id = ?').run(clientId);
 
     return client;
 }
 
 // ==================== MEMORY FUNCTIONS (metadata only) ====================
 
-export async function saveMemory(id, content, metadata) {
-    await db.insert(memories).values({
+export function saveMemory(id, content, metadata) {
+    const database = getDb();
+
+    database.prepare(`
+        INSERT INTO memories (id, content, category, shared, project_id, client_id, user_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
         id,
         content,
-        category: metadata.category || '',
-        shared: metadata.shared !== false,
-        projectId: metadata.projectId || null,
-        clientId: metadata.clientId || null,
-        userId: metadata.user || getCurrentUser(),
-    });
+        metadata.category || '',
+        metadata.shared ? 1 : 0,
+        metadata.projectId || null,
+        metadata.clientId || null,
+        metadata.user || getCurrentUser()
+    );
 
     return { id, content, ...metadata };
 }
 
-export async function getMemories(options = {}) {
+export function getMemories(options = {}) {
+    const database = getDb();
     const userId = getCurrentUser();
 
-    let conditions = [
-        or(
-            eq(memories.shared, true),
-            eq(memories.userId, userId)
-        ),
-    ];
+    let query = 'SELECT * FROM memories WHERE (shared = 1 OR user_id = ?)';
+    const params = [userId];
 
     if (options.category) {
-        conditions.push(ilike(memories.category, options.category));
+        query += ' AND LOWER(category) = LOWER(?)';
+        params.push(options.category);
     }
     if (options.project) {
-        conditions.push(eq(memories.projectId, options.project.toLowerCase().trim()));
+        query += ' AND project_id = ?';
+        params.push(options.project.toLowerCase().trim());
     }
     if (options.client) {
-        conditions.push(eq(memories.clientId, options.client.toLowerCase().trim().replace(/\s+/g, '-')));
+        query += ' AND client_id = ?';
+        params.push(options.client.toLowerCase().trim().replace(/\s+/g, '-'));
     }
     if (options.personal) {
-        conditions.push(eq(memories.shared, false));
+        query += ' AND shared = 0';
     }
 
-    const result = await db
-        .select()
-        .from(memories)
-        .where(and(...conditions))
-        .orderBy(desc(memories.createdAt));
+    query += ' ORDER BY created_at DESC';
 
-    return result;
+    return database.prepare(query).all(...params);
 }
 
-export async function deleteMemoryFromDb(memoryId) {
-    const [memory] = await db.select().from(memories).where(eq(memories.id, memoryId)).limit(1);
+export function deleteMemoryFromDb(memoryId) {
+    const database = getDb();
+    const memory = database.prepare('SELECT * FROM memories WHERE id = ?').get(memoryId);
 
     if (!memory) return null;
 
-    await db.delete(memories).where(eq(memories.id, memoryId));
+    database.prepare('DELETE FROM memories WHERE id = ?').run(memoryId);
 
     return memory;
 }
 
 // ==================== USER FUNCTIONS for Auth ====================
 
-export async function createUser(username, email, role = 'member', githubId = null) {
+export function createUser(username, email, role = 'member', githubId = null) {
+    const database = getDb();
     const id = username.toLowerCase().trim();
 
     try {
-        const [existing] = await db.select().from(users).where(eq(users.id, id)).limit(1);
+        const existing = database.prepare('SELECT * FROM users WHERE id = ?').get(id);
         if (existing) {
             return { error: 'User already exists', user: existing };
         }
 
-        await db.insert(users).values({
-            id,
-            username,
-            email,
-            role,
-            githubId,
-            createdAt: new Date(),
-        });
+        database.prepare(`
+            INSERT INTO users (id, username, email, role, github_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        `).run(id, username, email, role, githubId, new Date().toISOString());
 
-        const [user] = await db.select().from(users).where(eq(users.id, id)).limit(1);
-        return user;
+        return database.prepare('SELECT * FROM users WHERE id = ?').get(id);
     } catch (err) {
         console.error('Error creating user:', err);
         return { error: err.message };
     }
 }
 
-export async function getUser(identifier) {
+export function getUser(identifier) {
+    const database = getDb();
     if (!identifier) return null;
 
     // Try by ID (username)
-    let [user] = await db.select().from(users).where(eq(users.id, identifier.toLowerCase())).limit(1);
+    let user = database.prepare('SELECT * FROM users WHERE id = ?').get(identifier.toLowerCase());
 
-    // Try by GitHub ID if not found
+    // Try by GitHub ID if not found and looks like an ID
     if (!user) {
-        [user] = await db.select().from(users).where(eq(users.githubId, identifier)).limit(1);
+        user = database.prepare('SELECT * FROM users WHERE github_id = ?').get(identifier);
     }
 
-    return user || null;
-}
-
-export async function getUsers() {
-    return await db.select().from(users).orderBy(users.username);
-}
-
-export async function updateUser(userId, updates) {
-    const setValues = {};
-    if (updates.email !== undefined) setValues.email = updates.email;
-    if (updates.role !== undefined) setValues.role = updates.role;
-    if (updates.lastLogin !== undefined) setValues.lastLogin = new Date(updates.lastLogin);
-    if (updates.githubId !== undefined) setValues.githubId = updates.githubId;
-
-    if (Object.keys(setValues).length > 0) {
-        await db.update(users).set(setValues).where(eq(users.id, userId.toLowerCase()));
-    }
-
-    const [user] = await db.select().from(users).where(eq(users.id, userId.toLowerCase())).limit(1);
     return user;
 }
 
-export async function deleteUser(userId) {
-    const [user] = await db.select().from(users).where(eq(users.id, userId.toLowerCase())).limit(1);
+export function getUsers() {
+    const database = getDb();
+    return database.prepare('SELECT * FROM users ORDER BY username').all();
+}
+
+export function updateUser(userId, updates) {
+    const database = getDb();
+    const sets = [];
+    const values = [];
+
+    if (updates.email !== undefined) { sets.push('email = ?'); values.push(updates.email); }
+    if (updates.role !== undefined) { sets.push('role = ?'); values.push(updates.role); }
+    if (updates.lastLogin !== undefined) { sets.push('last_login = ?'); values.push(updates.lastLogin); }
+    if (updates.githubId !== undefined) { sets.push('github_id = ?'); values.push(updates.githubId); }
+
+    if (sets.length > 0) {
+        values.push(userId.toLowerCase());
+        database.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).run(...values);
+    }
+
+    return database.prepare('SELECT * FROM users WHERE id = ?').get(userId.toLowerCase());
+}
+
+export function deleteUser(userId) {
+    const database = getDb();
+    const user = database.prepare('SELECT * FROM users WHERE id = ?').get(userId.toLowerCase());
 
     if (!user) return null;
 
-    await db.delete(users).where(eq(users.id, userId.toLowerCase()));
+    database.prepare('DELETE FROM users WHERE id = ?').run(userId.toLowerCase());
     return user;
 }
+
