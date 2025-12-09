@@ -1,3 +1,5 @@
+name: calq
+
 services:
   calq:
     build: .
