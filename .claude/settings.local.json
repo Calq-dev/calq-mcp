@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --check:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push)",
+      "WebFetch(domain:hub.docker.com)",
+      "Bash(docker run:*)",
+      "Bash(docker logs calq-mcp-chromadb-1)",
+      "Bash(docker exec chroma-test python3 -c \"import urllib.request; print(urllib.request.urlopen(''http://localhost:8000/api/v1/heartbeat'').read())\")",
+      "Bash(docker exec:*)",
+      "Bash(curl:*)",
+      "Bash(docker stop:*)",
+      "Bash(docker rm:*)",
+      "Bash(docker inspect:*)",
+      "Bash(docker build:*)",
+      "Bash(docker rmi:*)",
+      "WebSearch",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(npm install)"
+    ]
+  }
+}
