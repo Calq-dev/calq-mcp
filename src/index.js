@@ -88,7 +88,7 @@ server.tool(
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
 
-        const entry = addEntry(project, minutes || 0, message, 'commit', billable !== false, date || null, auth.user.id);
+        const entry = await addEntry(project, minutes || 0, message, 'commit', billable !== false, date || null, auth.user.id);
 
         let text = `📌 **${project}**\n\n${message}`;
         if (minutes) {
@@ -114,7 +114,7 @@ server.tool(
         entry_id: z.string().optional().describe('ID of the entry to delete (deletes last entry if not provided)')
     },
     async ({ entry_id }) => {
-        const deleted = deleteEntry(entry_id || null);
+        const deleted = await deleteEntry(entry_id || null);
 
         if (!deleted) {
             return {
@@ -151,12 +151,12 @@ server.tool(
 
         const updates = {};
         if (project) updates.project = project;
-        if (message) updates.message = message;
+        if (message) updates.description = message;
         if (minutes !== undefined) updates.minutes = minutes;
         if (billable !== undefined) updates.billable = billable;
         if (billed !== undefined) updates.billed = billed;
 
-        const updated = editEntry(entry_id, updates);
+        const updated = await editEntry(entry_id, updates);
 
         if (!updated) {
             return {
@@ -183,7 +183,7 @@ server.tool(
     'list_projects',
     {},
     async () => {
-        const projects = getProjects();
+        const projects = await getProjects();
 
         if (projects.length === 0) {
             return {
@@ -195,7 +195,7 @@ server.tool(
         }
 
         const projectList = projects
-            .sort((a, b) => b.totalMinutes - a.totalMinutes)
+            .sort((a, b) => (b.totalMinutes || 0) - (a.totalMinutes || 0))
             .map(p => `• **${p.name}**: ${p.totalFormatted}`)
             .join('\n');
 
@@ -216,10 +216,10 @@ server.tool(
         limit: z.number().positive().optional().describe('Number of recent entries to show (default: 10)')
     },
     async ({ project, limit }) => {
-        const entries = getProjectEntries(project, limit || 10);
-        const projects = getProjects();
+        const entries = await getProjectEntries(project, limit || 10);
+        const projects = await getProjects();
         const projectData = projects.find(p =>
-            p.id === project.toLowerCase().trim() ||
+            p.id === project.toLowerCase().trim().replace(/\s+/g, '-') ||
             p.name.toLowerCase() === project.toLowerCase()
         );
 
@@ -267,7 +267,7 @@ server.tool(
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
 
-        const summary = getTodaySummary(auth.user.id);
+        const summary = await getTodaySummary(auth.user.id);
 
         if (summary.projects.length === 0) {
             return {
@@ -306,7 +306,7 @@ server.tool(
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
 
-        const summary = getWeeklySummary(auth.user.id);
+        const summary = await getWeeklySummary(auth.user.id);
 
         if (summary.days.length === 0) {
             return {
@@ -341,7 +341,7 @@ server.tool(
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
 
-        const summary = getUnbilledSummary(auth.user.id);
+        const summary = await getUnbilledSummary(auth.user.id);
 
         if (summary.projects.length === 0) {
             return {
@@ -378,14 +378,14 @@ server.tool(
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
 
-        const result = startTimer(project, description || '', auth.user.id);
+        const result = await startTimer(project, description || '', auth.user.id);
 
         if (result.error) {
             const elapsed = formatDuration(Math.round((new Date() - new Date(result.timer.startedAt)) / 60000));
             return {
                 content: [{
                     type: 'text',
-                    text: `⚠️ Timer already running on **${result.timer.project}** (${elapsed})\n\n${result.timer.description || ''}\n\nStop it first with the stop tool.`
+                    text: `⚠️ Timer already running on **${result.timer.projectId}** (${elapsed})\n\n${result.timer.description || ''}\n\nStop it first with the stop tool.`
                 }]
             };
         }
@@ -412,7 +412,7 @@ server.tool(
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
 
-        const result = stopTimer(message || null, billable !== false, auth.user.id);
+        const result = await stopTimer(message || null, billable !== false, auth.user.id);
 
         if (result.error) {
             return {
@@ -442,7 +442,7 @@ server.tool(
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
 
-        const timer = getActiveTimer(auth.user.id);
+        const timer = await getActiveTimer(auth.user.id);
 
         if (!timer) {
             return {
@@ -453,7 +453,7 @@ server.tool(
         return {
             content: [{
                 type: 'text',
-                text: `⏱️ Timer running: **${timer.project}** (${timer.elapsedFormatted})\n\n${timer.description || ''}`
+                text: `⏱️ Timer running: **${timer.projectName}** (${timer.elapsedFormatted})\n\n${timer.description || ''}`
             }]
         };
     }
@@ -469,9 +469,9 @@ server.tool(
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
 
-        const timer = cancelTimer(auth.user.id);
+        const result = await cancelTimer(auth.user.id);
 
-        if (!timer) {
+        if (result.error) {
             return {
                 content: [{ type: 'text', text: '❌ No timer to cancel.' }]
             };
@@ -480,7 +480,7 @@ server.tool(
         return {
             content: [{
                 type: 'text',
-                text: `🚫 Timer cancelled (not saved)\n\nWas tracking: **${timer.project}**`
+                text: `🚫 Timer cancelled (not saved)\n\nWas tracking: **${result.project}**`
             }]
         };
     }
@@ -564,7 +564,7 @@ server.tool(
         client: z.string().optional().describe('Filter by client')
     },
     async ({ project, client }) => {
-        const memories = getAllMemories({
+        const memories = await getAllMemories({
             category: 'idea',
             project: project || null,
             client: client || null
@@ -669,7 +669,6 @@ server.tool(
     }
 );
 
-// Tool: List all memories
 // Tool: List memories
 server.tool(
     'list_memories',
@@ -680,7 +679,7 @@ server.tool(
         personal: z.boolean().optional().describe('Show only personal memories')
     },
     async ({ category, project, client, personal }) => {
-        const memories = getAllMemories({
+        const memories = await getAllMemories({
             category: category || null,
             project: project || null,
             client: client || null,
@@ -717,7 +716,7 @@ server.tool(
         memory_id: z.string().describe('ID of the memory to delete (use list_memories to see IDs)')
     },
     async ({ memory_id }) => {
-        const deleted = deleteMemory(memory_id);
+        const deleted = await deleteMemory(memory_id);
 
         if (!deleted) {
             return {
@@ -745,7 +744,7 @@ server.tool(
         notes: z.string().optional().describe('Notes about the client')
     },
     async ({ name, email, notes }) => {
-        const result = createClient(name, email || '', notes || '');
+        const result = await createClient(name, email || '', notes || '');
 
         if (result.error) {
             return {
@@ -767,7 +766,7 @@ server.tool(
     'list_clients',
     {},
     async () => {
-        const clients = getClients();
+        const clients = await getClients();
 
         if (clients.length === 0) {
             return {
@@ -798,7 +797,7 @@ server.tool(
         notes: z.string().optional().describe('Project notes')
     },
     async ({ name, client, hourly_rate, notes }) => {
-        const project = createProject(name, client || null, hourly_rate || 0, notes || '');
+        const project = await createProject(name, client || null, hourly_rate || 0, notes || '');
 
         let text = `📁 Project configured: **${project.name}**`;
         if (project.clientId) text += `\n👤 Client: ${project.clientId}`;
@@ -817,7 +816,7 @@ server.tool(
         client: z.string().optional().describe('Filter by client name')
     },
     async ({ client }) => {
-        const projects = getProjectsWithClients(client || null);
+        const projects = await getProjectsWithClients(client || null);
 
         if (projects.length === 0) {
             return {
@@ -850,7 +849,7 @@ server.tool(
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
 
-        const summary = getUnbilledByClient(auth.user.id);
+        const summary = await getUnbilledByClient(auth.user.id);
 
         if (summary.clients.length === 0) {
             return {
@@ -928,7 +927,7 @@ server.tool(
             return { content: [{ type: 'text', text: '🔒 Admin access required' }] };
         }
 
-        const users = getUsers();
+        const users = await getUsers();
 
         if (users.length === 0) {
             return { content: [{ type: 'text', text: '👥 No users yet. Login at http://localhost:3847' }] };
@@ -962,7 +961,7 @@ server.tool(
             return { content: [{ type: 'text', text: '🔒 Admin access required' }] };
         }
 
-        const updated = updateUserAuth(username, { role });
+        const updated = await updateUserAuth(username, { role });
 
         if (!updated) {
             return { content: [{ type: 'text', text: '❌ User "' + username + '" not found' }] };
@@ -988,8 +987,8 @@ server.tool(
             return { content: [{ type: 'text', text: '🔒 ' + auth.error }] };
         }
 
-        const today = getTodaySummary(auth.user.id);
-        const users = getUsers();
+        const today = await getTodaySummary(auth.user.id);
+        const users = await getUsers();
 
         let text = '👥 **Team Summary** (' + new Date().toLocaleDateString() + ')\n';
         text += '⏱️ Your total today: ' + today.totalFormatted + '\n\n';
