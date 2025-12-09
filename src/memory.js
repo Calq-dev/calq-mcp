@@ -24,7 +24,7 @@ async function getVoyageEmbedder() {
         }
         voyageEmbedder = new VoyageAIEmbeddingFunction({
             apiKey: apiKey,
-            model: 'voyage-3-lite'
+            modelName: 'voyage-3-lite'
         });
     }
     return voyageEmbedder;
