@@ -503,6 +503,77 @@ export async function getUnbilledByClient(userId = null) {
     };
 }
 
+export async function getTeamTodaySummary() {
+    const today = new Date().toISOString().split('T')[0];
+
+    const result = await db
+        .select({
+            id: entries.id,
+            projectId: entries.projectId,
+            minutes: entries.minutes,
+            description: entries.description,
+            userId: entries.userId,
+            createdAt: entries.createdAt,
+            projectName: projects.name,
+            username: users.username,
+        })
+        .from(entries)
+        .innerJoin(projects, eq(entries.projectId, projects.id))
+        .leftJoin(users, eq(entries.userId, users.id))
+        .where(sql`date(${entries.createdAt}) = ${today}`)
+        .orderBy(desc(entries.createdAt));
+
+    // Group by user, then by project
+    const userSummary = {};
+    let teamTotalMinutes = 0;
+
+    for (const entry of result) {
+        const userId = entry.userId || 'unknown';
+        const username = entry.username || userId;
+
+        if (!userSummary[userId]) {
+            userSummary[userId] = {
+                username,
+                totalMinutes: 0,
+                projects: {},
+            };
+        }
+
+        if (!userSummary[userId].projects[entry.projectId]) {
+            userSummary[userId].projects[entry.projectId] = {
+                name: entry.projectName,
+                minutes: 0,
+            };
+        }
+
+        userSummary[userId].projects[entry.projectId].minutes += entry.minutes;
+        userSummary[userId].totalMinutes += entry.minutes;
+        teamTotalMinutes += entry.minutes;
+    }
+
+    return {
+        date: today,
+        teamTotalMinutes,
+        teamTotalFormatted: formatDuration(teamTotalMinutes),
+        members: Object.entries(userSummary)
+            .sort((a, b) => b[1].totalMinutes - a[1].totalMinutes) // Sort by most time logged
+            .map(([userId, data]) => ({
+                userId,
+                username: data.username,
+                totalMinutes: data.totalMinutes,
+                totalFormatted: formatDuration(data.totalMinutes),
+                projects: Object.entries(data.projects)
+                    .sort((a, b) => b[1].minutes - a[1].minutes) // Sort by most time
+                    .map(([projectId, pdata]) => ({
+                        id: projectId,
+                        name: pdata.name,
+                        minutes: pdata.minutes,
+                        durationFormatted: formatDuration(pdata.minutes),
+                    })),
+            })),
+    };
+}
+
 // ==================== TIMER FUNCTIONS ====================
 
 export async function startTimer(projectName, description = '', userId = null) {
