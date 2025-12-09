@@ -1029,6 +1029,7 @@ async function main() {
     const baseUrl = process.env.BASE_URL || `http://localhost:${port}`;
 
     const app = express();
+    app.set('trust proxy', 1); // Trust first proxy (nginx)
     app.use(express.json());
 
     // Store sessions
