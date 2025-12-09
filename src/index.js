@@ -931,7 +931,7 @@ server.tool(
         const users = getUsers();
 
         if (users.length === 0) {
-            return { content: [{ type: 'text', text: '👥 No users yet. Login at http://localhost:3847' }] };
+            return { content: [{ type: 'text', text: '👥 No users yet. Complete OAuth authentication first.' }] };
         }
 
         let text = '👥 **Users** (' + users.length + ')\n\n';
@@ -1003,6 +1003,25 @@ server.tool(
         return { content: [{ type: 'text', text }] };
     }
 );
+
+// Graceful shutdown
+function setupGracefulShutdown(httpServer) {
+    const shutdown = (signal) => {
+        console.log(`\n${signal} received, shutting down gracefully...`);
+        httpServer.close(() => {
+            console.log('HTTP server closed');
+            process.exit(0);
+        });
+        // Force exit after 10 seconds
+        setTimeout(() => {
+            console.log('Forcing shutdown');
+            process.exit(1);
+        }, 10000);
+    };
+
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
+}
 
 // Start the server
 async function main() {
@@ -1141,10 +1160,13 @@ async function main() {
         res.json({ status: 'ok', sessions: sessions.size });
     });
 
-    app.listen(port, () => {
-        console.error(`Calq MCP server running on http://localhost:${port}/mcp`);
-        console.error(`OAuth: http://localhost:${port}/oauth/authorize`);
+    const httpServer = app.listen(port, () => {
+        const baseUrl = process.env.BASE_URL || `http://localhost:${port}`;
+        console.log(`Calq MCP server running on ${baseUrl}/mcp`);
+        console.log(`OAuth: ${baseUrl}/oauth/authorize`);
     });
+
+    setupGracefulShutdown(httpServer);
 }
 
 main().catch(console.error);
