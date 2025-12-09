@@ -87,13 +87,13 @@ async function getGitHubUser(accessToken) {
  * Create or get user from GitHub profile
  */
 async function getOrCreateUser(githubUser) {
-    let user = getUser(githubUser.id.toString());
+    let user = await getUser(githubUser.id.toString());
 
     if (!user) {
-        const users = getUsers();
+        const users = await getUsers();
         const role = users.length === 0 ? 'admin' : 'member';
 
-        user = createUser(
+        user = await createUser(
             githubUser.login,
             githubUser.email || `${githubUser.login}@github`,
             role,
@@ -101,7 +101,7 @@ async function getOrCreateUser(githubUser) {
         );
     }
 
-    updateUser(user.id, { lastLogin: new Date().toISOString() });
+    await updateUser(user.id, { lastLogin: new Date().toISOString() });
     return user;
 }
 
@@ -342,7 +342,7 @@ export class GitHubOAuthProvider {
         }
 
         // Get user info
-        const user = getUser(tokenData.userId);
+        const user = await getUser(tokenData.userId);
 
         return {
             clientId: tokenData.clientId,

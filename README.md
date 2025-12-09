@@ -28,6 +28,7 @@ A Model Context Protocol (MCP) server for time tracking, project management, AI-
 ## Prerequisites
 
 - Node.js 20+
+- **PostgreSQL** - Relational database for structured data
 - **ChromaDB** - Vector database for semantic search
 - **Voyage AI API key** - For generating embeddings
 - **GitHub OAuth App** - For user authentication
@@ -36,7 +37,7 @@ A Model Context Protocol (MCP) server for time tracking, project management, AI-
 
 ### Option 1: Docker Compose (Recommended)
 
-This automatically sets up both Calq and ChromaDB:
+This automatically sets up Calq, PostgreSQL, and ChromaDB:
 
 ```bash
 git clone https://github.com/Calq-dev/calq-mcp.git
@@ -55,12 +56,17 @@ MCP_PORT=3001 CHROMA_PORT=8001 docker compose up -d
 
 Services:
 - **Calq MCP**: `http://localhost:${MCP_PORT}/mcp` (default: 3000)
+- **PostgreSQL**: Internal to Docker (port 5432)
 - **ChromaDB**: `http://localhost:${CHROMA_PORT}` (default: 8000, internal to Docker)
 
 ### Option 2: Local Development
 
 ```bash
-# 1. Start ChromaDB (required for memory features)
+# 1. Start PostgreSQL and ChromaDB (required)
+docker run -d --name postgres -p 5432:5432 \
+  -e POSTGRES_USER=calq -e POSTGRES_PASSWORD=calq -e POSTGRES_DB=calq \
+  postgres:16-alpine
+
 docker run -d --name chromadb -p 8000:8000 chromadb/chroma:latest
 
 # 2. Clone and install
@@ -72,7 +78,10 @@ npm install
 cp .env.example .env
 # Edit .env with your API keys
 
-# 4. Start the server
+# 4. Push database schema
+npm run db:push
+
+# 5. Start the server
 node src/index.js
 ```
 
@@ -82,12 +91,32 @@ node src/index.js
 
 | Variable | Required | Description |
 |----------|----------|-------------|
+| `DATABASE_URL` | Yes | PostgreSQL connection URL |
+| `POSTGRES_PASSWORD` | No | PostgreSQL password for Docker (default: calq) |
 | `VOYAGE_API_KEY` | Yes | Voyage AI API key for embeddings |
 | `CHROMA_URL` | No | ChromaDB URL (default: `http://localhost:8000`) |
 | `GITHUB_CLIENT_ID` | Yes | GitHub OAuth App client ID |
 | `GITHUB_CLIENT_SECRET` | Yes | GitHub OAuth App client secret |
 | `MCP_PORT` | No | Server port (default: 3000) |
 | `OAUTH_CALLBACK_URL` | No | OAuth callback (default: `http://localhost:3000/oauth/callback`) |
+
+### Database Management
+
+Calq uses [Drizzle ORM](https://orm.drizzle.team) with PostgreSQL:
+
+```bash
+# Generate migrations from schema changes
+npm run db:generate
+
+# Apply migrations
+npm run db:migrate
+
+# Push schema directly (development)
+npm run db:push
+
+# Open Drizzle Studio
+npm run db:studio
+```
 
 ### GitHub OAuth Setup
 
@@ -96,7 +125,7 @@ node src/index.js
 3. Fill in:
    - **Application name:** Calq
    - **Homepage URL:** `http://localhost:3000`
-   - **Authorization callback URL:** `http://localhost:3000/oauth/callback`
+   - **Authorization callback URL:** `http://localhost:3000/oauth/github/callback`
 4. Copy the Client ID and generate a Client Secret
 5. Add both to your `.env` file
 
@@ -193,21 +222,20 @@ When you first use Calq, Claude Desktop will open a browser for GitHub authentic
                                  │
                                  ▼
                         ┌─────────────────┐
-                        │     SQLite      │
-                        │  (~/.calq/)     │
+                        │   PostgreSQL    │
+                        │  (Port 5432)    │
                         └─────────────────┘
 ```
 
-- **SQLite** - Source of truth for structured data (entries, projects, users)
+- **PostgreSQL** - Source of truth for structured data (entries, projects, users)
 - **ChromaDB** - Vector store for semantic search (memories, entry embeddings)
+- **Drizzle ORM** - Type-safe database access layer
 
 ## Data Storage
 
-- **SQLite database**: `~/.calq/calq.db`
-- **ChromaDB**: Embeddings stored in ChromaDB container/instance
-
 In Docker, data is persisted via volumes:
-- `calq-data` - SQLite database
+- `calq-data` - Application data
+- `postgres-data` - PostgreSQL database
 - `chroma-data` - ChromaDB embeddings
 
 ## License

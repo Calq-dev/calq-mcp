@@ -88,8 +88,8 @@ export async function storeMemory(content, options = {}) {
         // Continue to save in DB even if vector store fails
     }
 
-    // Store in SQLite
-    return saveMemory(id, content, metadata);
+    // Store in PostgreSQL
+    return await saveMemory(id, content, metadata);
 }
 
 /**
@@ -146,16 +146,16 @@ export async function searchMemories(query, options = {}) {
         }));
     } catch (error) {
         console.error('ChromaDB search error:', error.message);
-        // Fallback to SQLite search
-        return fallbackSearchMemories(query, options);
+        // Fallback to PostgreSQL search
+        return await fallbackSearchMemories(query, options);
     }
 }
 
 /**
- * Fallback search using SQLite LIKE
+ * Fallback search using PostgreSQL LIKE
  */
-function fallbackSearchMemories(query, options = {}) {
-    const memories = getAllMemories(options);
+async function fallbackSearchMemories(query, options = {}) {
+    const memories = await getAllMemories(options);
     const queryLower = query.toLowerCase();
 
     return memories
@@ -251,8 +251,8 @@ export async function searchEntries(query, limit = 10) {
  * @returns {Object|null} Deleted memory or null
  */
 export async function deleteMemory(memoryId) {
-    // Delete from SQLite
-    const deleted = deleteMemoryFromDb(memoryId);
+    // Delete from PostgreSQL
+    const deleted = await deleteMemoryFromDb(memoryId);
 
     if (deleted) {
         // Also delete from ChromaDB
@@ -270,8 +270,8 @@ export async function deleteMemory(memoryId) {
 /**
  * Get all memories (filtered by visibility)
  * @param {Object} options - Filter options
- * @returns {Object[]} Filtered memories
+ * @returns {Promise<Object[]>} Filtered memories
  */
-export function getAllMemories(options = {}) {
-    return getMemories(options);
+export async function getAllMemories(options = {}) {
+    return await getMemories(options);
 }

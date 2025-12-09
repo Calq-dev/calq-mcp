@@ -159,15 +159,15 @@ export async function handleOAuthCallback(code, state) {
     const githubUser = await getGitHubUser(tokenResponse.access_token);
 
     // Check if user exists
-    let user = getUser(githubUser.id.toString());
+    let user = await getUser(githubUser.id.toString());
 
     if (!user) {
         // Check if this is the first user (make them admin)
-        const users = getUsers();
+        const users = await getUsers();
         const role = users.length === 0 ? 'admin' : 'member';
 
         // Create new user
-        user = createUser(
+        user = await createUser(
             githubUser.login,
             githubUser.email || `${githubUser.login}@github`,
             role,
@@ -176,7 +176,7 @@ export async function handleOAuthCallback(code, state) {
     }
 
     // Update last login
-    updateUser(user.id, { lastLogin: new Date().toISOString() });
+    await updateUser(user.id, { lastLogin: new Date().toISOString() });
 
     return {
         user: user,
