@@ -46,13 +46,16 @@ cd calq-mcp
 cp .env.example .env
 # Edit .env with your API keys
 
-# Start services
+# Start services (uses default ports 3000 and 8000)
 docker compose up -d
+
+# Or with custom ports
+MCP_PORT=3001 CHROMA_PORT=8001 docker compose up -d
 ```
 
 Services:
-- **Calq MCP**: `http://localhost:3000/mcp`
-- **ChromaDB**: `http://localhost:8000` (internal)
+- **Calq MCP**: `http://localhost:${MCP_PORT}/mcp` (default: 3000)
+- **ChromaDB**: `http://localhost:${CHROMA_PORT}` (default: 8000, internal to Docker)
 
 ### Option 2: Local Development
 

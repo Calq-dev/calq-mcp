@@ -2,6 +2,8 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
+import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import express from 'express';
 import { AsyncLocalStorage } from 'async_hooks';
 import crypto from 'crypto';
@@ -28,7 +30,8 @@ import {
     createProject,
     getProjectsWithClients,
     updateProject,
-    getUnbilledByClient
+    getUnbilledByClient,
+    getUser
 } from './storage.js';
 import {
     storeMemory,
@@ -39,13 +42,10 @@ import {
 } from './memory.js';
 import {
     getUsers,
-    getUser,
     updateUser as updateUserAuth,
-    deleteUser as deleteUserAuth,
-    getAuthUrl,
-    getMcpSessionFromState,
-    handleOAuthCallback
+    deleteUser as deleteUserAuth
 } from './auth.js';
+import { oauthProvider } from './oauth-provider.js';
 
 // Request context for passing authenticated user to tool handlers
 const requestContext = new AsyncLocalStorage();
@@ -930,7 +930,7 @@ server.tool(
         const users = await getUsers();
 
         if (users.length === 0) {
-            return { content: [{ type: 'text', text: '👥 No users yet. Login at http://localhost:3847' }] };
+            return { content: [{ type: 'text', text: '👥 No users yet. Complete OAuth authentication first.' }] };
         }
 
         let text = '👥 **Users** (' + users.length + ')\n\n';
@@ -1003,92 +1003,49 @@ server.tool(
     }
 );
 
+// Graceful shutdown
+function setupGracefulShutdown(httpServer) {
+    const shutdown = (signal) => {
+        console.log(`\n${signal} received, shutting down gracefully...`);
+        httpServer.close(() => {
+            console.log('HTTP server closed');
+            process.exit(0);
+        });
+        // Force exit after 10 seconds
+        setTimeout(() => {
+            console.log('Forcing shutdown');
+            process.exit(1);
+        }, 10000);
+    };
+
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
+}
+
 // Start the server
 async function main() {
     const port = parseInt(process.env.MCP_PORT || '3000');
+    const baseUrl = process.env.BASE_URL || `http://localhost:${port}`;
 
     const app = express();
+    app.set('trust proxy', 1); // Trust first proxy (nginx)
     app.use(express.json());
 
     // Store sessions
     const sessions = new Map();
 
-    // Store pending auth sessions (MCP session ID -> auth state)
-    const pendingAuth = new Map();
-
-    // OAuth metadata endpoint (RFC 8414) - tells Claude Desktop where to auth
-    app.get('/.well-known/oauth-authorization-server', (req, res) => {
-        const baseUrl = process.env.BASE_URL || `http://localhost:${port}`;
-        res.json({
-            issuer: baseUrl,
-            authorization_endpoint: `${baseUrl}/oauth/authorize`,
-            token_endpoint: `${baseUrl}/oauth/token`,
-            response_types_supported: ['code'],
-            grant_types_supported: ['authorization_code'],
-            code_challenge_methods_supported: ['S256']
-        });
+    // Setup MCP OAuth using the SDK's auth router
+    const authRouter = mcpAuthRouter({
+        provider: oauthProvider,
+        issuerUrl: new URL(baseUrl),
+        baseUrl: new URL(baseUrl),
+        scopesSupported: ['mcp:tools'],
+        resourceName: 'Calq MCP Server'
     });
+    app.use(authRouter);
 
-    // MCP endpoint - HTTP streaming only
-    app.post('/mcp', async (req, res) => {
-        const sessionId = req.headers['mcp-session-id'];
-
-        let transport;
-        let newSessionId;
-        let user = null;
-
-        if (sessionId && sessions.has(sessionId)) {
-            const session = sessions.get(sessionId);
-            transport = session.transport;
-            user = session.user;
-        } else {
-            // Create new session
-            newSessionId = crypto.randomUUID();
-            transport = new StreamableHTTPServerTransport({
-                sessionId: newSessionId
-            });
-
-            // Check if this session completed OAuth
-            if (pendingAuth.has(newSessionId)) {
-                user = pendingAuth.get(newSessionId);
-                pendingAuth.delete(newSessionId);
-            }
-
-            sessions.set(newSessionId, { transport, user });
-            await server.connect(transport);
-        }
-
-        // Run request with user context
-        await requestContext.run({ user }, async () => {
-            try {
-                const response = await transport.handleRequest(req.body);
-
-                if (newSessionId) {
-                    res.setHeader('mcp-session-id', newSessionId);
-                }
-
-                res.json(response);
-            } catch (err) {
-                res.status(500).json({ error: err.message });
-            }
-        });
-    });
-
-    // OAuth initiation endpoint
-    app.get('/oauth/authorize', (req, res) => {
-        const { session_id } = req.query;
-
-        try {
-            // getAuthUrl stores session_id with the state internally
-            const { url } = getAuthUrl(session_id || null);
-            res.redirect(url);
-        } catch (error) {
-            res.status(500).send(`OAuth setup failed: ${error.message}`);
-        }
-    });
-
-    // OAuth callback endpoint - links OAuth result to MCP session
-    app.get('/oauth/callback', async (req, res) => {
+    // GitHub OAuth callback - handles the redirect from GitHub
+    app.get('/oauth/github/callback', async (req, res) => {
         const { code, state } = req.query;
 
         if (!code || !state) {
@@ -1097,37 +1054,94 @@ async function main() {
         }
 
         try {
-            // Get MCP session ID from the state before it's consumed
-            const mcpSessionId = getMcpSessionFromState(state);
-
-            // Handle the OAuth callback (validates state, exchanges code for token)
-            const result = await handleOAuthCallback(code, state);
-
-            // Link user to MCP session
-            if (mcpSessionId && sessions.has(mcpSessionId)) {
-                const session = sessions.get(mcpSessionId);
-                session.user = result.user;
-            } else if (mcpSessionId) {
-                pendingAuth.set(mcpSessionId, result.user);
-            }
-
-            res.send(`
-                <!DOCTYPE html>
-                <html>
-                <head><title>Calq - Authenticated</title></head>
-                <body style="font-family: system-ui; padding: 40px; text-align: center;">
-                    <h1>✅ Authenticated as ${result.user.username}</h1>
-                    <p>You can close this window and return to Claude.</p>
-                </body>
-                </html>
-            `);
+            const redirectUrl = await oauthProvider.handleGitHubCallback(code, state);
+            res.redirect(redirectUrl);
         } catch (error) {
-            res.status(500).send(`Authentication failed: ${error.message}`);
+            res.status(500).send(`GitHub authentication failed: ${error.message}`);
         }
     });
 
+    // Bearer auth middleware for protected endpoints
+    const bearerAuthMiddleware = requireBearerAuth({
+        verifier: {
+            verifyAccessToken: async (token) => {
+                try {
+                    const result = await oauthProvider.verifyAccessToken(token);
+                    console.log('Token verified for user:', result.userId);
+                    return result;
+                } catch (error) {
+                    console.error('Token verification failed:', error.message);
+                    throw error;
+                }
+            }
+        }
+    });
+
+    // Wrap to catch errors from the middleware itself
+    const bearerAuth = (req, res, next) => {
+        Promise.resolve(bearerAuthMiddleware(req, res, next)).catch(err => {
+            console.error('Bearer auth middleware error:', err);
+            next(err);
+        });
+    };
+
+    // MCP endpoint handler (shared for GET, POST, DELETE)
+    async function handleMcpRequest(req, res) {
+        const sessionId = req.headers['mcp-session-id'];
+
+        // Get user from auth context (set by bearerAuth middleware)
+        const authInfo = req.auth;
+        let user = null;
+        if (authInfo && authInfo.userId) {
+            user = getUser(authInfo.userId);
+        }
+
+        let transport;
+        let newSessionId;
+
+        if (sessionId && sessions.has(sessionId)) {
+            const session = sessions.get(sessionId);
+            transport = session.transport;
+            // Update user if we have auth info
+            if (user) {
+                session.user = user;
+            } else {
+                user = session.user;
+            }
+        } else {
+            // Create new session
+            newSessionId = crypto.randomUUID();
+            transport = new StreamableHTTPServerTransport({
+                sessionId: newSessionId
+            });
+
+            sessions.set(newSessionId, { transport, user });
+            await server.connect(transport);
+        }
+
+        // Run request with user context
+        await requestContext.run({ user }, async () => {
+            try {
+                if (newSessionId) {
+                    res.setHeader('mcp-session-id', newSessionId);
+                }
+
+                await transport.handleRequest(req, res, req.body);
+            } catch (err) {
+                console.error('MCP request error:', err);
+                if (!res.headersSent) {
+                    res.status(500).json({ error: err.message });
+                }
+            }
+        });
+    }
+
+    // MCP endpoint - protected by bearer auth
+    app.post('/mcp', bearerAuth, handleMcpRequest);
+    app.get('/mcp', bearerAuth, handleMcpRequest);
+
     // Session cleanup
-    app.delete('/mcp', (req, res) => {
+    app.delete('/mcp', bearerAuth, (req, res) => {
         const sessionId = req.headers['mcp-session-id'];
         if (sessionId && sessions.has(sessionId)) {
             sessions.delete(sessionId);
@@ -1135,15 +1149,25 @@ async function main() {
         res.status(204).end();
     });
 
-    // Health check
+    // Health check (no auth required)
     app.get('/health', (req, res) => {
         res.json({ status: 'ok', sessions: sessions.size });
     });
 
-    app.listen(port, () => {
-        console.error(`Calq MCP server running on http://localhost:${port}/mcp`);
-        console.error(`OAuth: http://localhost:${port}/oauth/authorize`);
+    // Global error handler
+    app.use((err, req, res, next) => {
+        console.error('Unhandled error:', err);
+        if (!res.headersSent) {
+            res.status(500).json({ error: err.message });
+        }
     });
+
+    const httpServer = app.listen(port, () => {
+        console.log(`Calq MCP server running on ${baseUrl}/mcp`);
+        console.log(`OAuth: ${baseUrl}/oauth/authorize`);
+    });
+
+    setupGracefulShutdown(httpServer);
 }
 
 main().catch(console.error);

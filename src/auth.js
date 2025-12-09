@@ -15,8 +15,8 @@ export { createUser, getUser, getUsers, updateUser, deleteUser };
 
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
-// Default callback is on MCP server port
-const OAUTH_CALLBACK_URL = process.env.OAUTH_CALLBACK_URL || `http://localhost:${process.env.MCP_PORT || 3000}/oauth/callback`;
+const BASE_URL = process.env.BASE_URL || `http://localhost:${process.env.MCP_PORT || 3000}`;
+const OAUTH_CALLBACK_URL = process.env.OAUTH_CALLBACK_URL || `${BASE_URL}/oauth/callback`;
 
 // Store pending OAuth states (state -> { mcpSessionId, createdAt })
 const pendingStates = new Map();
