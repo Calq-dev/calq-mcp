@@ -1049,8 +1049,8 @@ async function main() {
         });
     });
 
-    // MCP endpoint - HTTP streaming only
-    app.post('/mcp', async (req, res) => {
+    // MCP endpoint handler (shared for GET and POST)
+    async function handleMcpRequest(req, res) {
         const sessionId = req.headers['mcp-session-id'];
 
         let transport;
@@ -1092,7 +1092,11 @@ async function main() {
                 }
             }
         });
-    });
+    }
+
+    // MCP endpoint - POST for requests, GET for SSE streaming
+    app.post('/mcp', handleMcpRequest);
+    app.get('/mcp', handleMcpRequest);
 
     // OAuth initiation endpoint
     app.get('/oauth/authorize', (req, res) => {
