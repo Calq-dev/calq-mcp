@@ -28,6 +28,7 @@ A Model Context Protocol (MCP) server for time tracking, project management, AI-
 ## Prerequisites
 
 - Node.js 20+
+- **PostgreSQL 16+** - Database for structured data
 - **ChromaDB** - Vector database for semantic search
 - **Voyage AI API key** - For generating embeddings
 - **GitHub OAuth App** - For user authentication
@@ -36,7 +37,7 @@ A Model Context Protocol (MCP) server for time tracking, project management, AI-
 
 ### Option 1: Docker Compose (Recommended)
 
-This automatically sets up both Calq and ChromaDB:
+This automatically sets up Calq, PostgreSQL, and ChromaDB:
 
 ```bash
 git clone https://github.com/Calq-dev/calq-mcp.git
@@ -55,12 +56,14 @@ MCP_PORT=3001 CHROMA_PORT=8001 docker compose up -d
 
 Services:
 - **Calq MCP**: `http://localhost:${MCP_PORT}/mcp` (default: 3000)
-- **ChromaDB**: `http://localhost:${CHROMA_PORT}` (default: 8000, internal to Docker)
+- **PostgreSQL**: Internal to Docker (port 5432)
+- **ChromaDB**: `http://localhost:${CHROMA_PORT}` (default: 8000)
 
 ### Option 2: Local Development
 
 ```bash
-# 1. Start ChromaDB (required for memory features)
+# 1. Start PostgreSQL and ChromaDB
+docker run -d --name postgres -e POSTGRES_USER=calq -e POSTGRES_PASSWORD=calq -e POSTGRES_DB=calq -p 5432:5432 postgres:16-alpine
 docker run -d --name chromadb -p 8000:8000 chromadb/chroma:latest
 
 # 2. Clone and install
@@ -70,10 +73,24 @@ npm install
 
 # 3. Configure environment
 cp .env.example .env
-# Edit .env with your API keys
+# Edit .env with your API keys and DATABASE_URL
 
-# 4. Start the server
-node src/index.js
+# 4. Push database schema
+npm run db:push
+
+# 5. Start the server
+npm start
+```
+
+### Option 3: Production Deployment
+
+See `docker-compose.prod.yml` for a production-ready setup with Traefik reverse proxy and Let's Encrypt SSL.
+
+```bash
+cp .env.production.example .env.production
+# Edit .env.production with your domain and credentials
+
+./scripts/deploy.sh --build
 ```
 
 ## Configuration
@@ -82,12 +99,14 @@ node src/index.js
 
 | Variable | Required | Description |
 |----------|----------|-------------|
+| `DATABASE_URL` | Yes | PostgreSQL connection URL |
 | `VOYAGE_API_KEY` | Yes | Voyage AI API key for embeddings |
 | `CHROMA_URL` | No | ChromaDB URL (default: `http://localhost:8000`) |
 | `GITHUB_CLIENT_ID` | Yes | GitHub OAuth App client ID |
 | `GITHUB_CLIENT_SECRET` | Yes | GitHub OAuth App client secret |
 | `MCP_PORT` | No | Server port (default: 3000) |
-| `OAUTH_CALLBACK_URL` | No | OAuth callback (default: `http://localhost:3000/oauth/callback`) |
+| `BASE_URL` | No | Public base URL (default: `http://localhost:3000`) |
+| `OAUTH_CALLBACK_URL` | No | OAuth callback (default: `${BASE_URL}/oauth/callback`) |
 
 ### GitHub OAuth Setup
 
@@ -115,6 +134,35 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 ```
 
 When you first use Calq, Claude Desktop will open a browser for GitHub authentication.
+
+## Database
+
+### Schema Management
+
+Calq uses [Drizzle ORM](https://orm.drizzle.team) for database management:
+
+```bash
+# Push schema changes to database (development)
+npm run db:push
+
+# Generate migration files
+npm run db:generate
+
+# Run migrations (production)
+npm run db:migrate
+
+# Open Drizzle Studio GUI
+npm run db:studio
+```
+
+### Tables
+
+- `users` - Team members with GitHub OAuth
+- `clients` - Client information
+- `projects` - Projects linked to clients with hourly rates
+- `entries` - Time entries
+- `memories` - Memory metadata (vectors stored in ChromaDB)
+- `active_timer` - Active timer per user
 
 ## Tools
 
@@ -193,22 +241,31 @@ When you first use Calq, Claude Desktop will open a browser for GitHub authentic
                                  │
                                  ▼
                         ┌─────────────────┐
-                        │     SQLite      │
-                        │  (~/.calq/)     │
+                        │   PostgreSQL    │
+                        │  (Port 5432)    │
                         └─────────────────┘
 ```
 
-- **SQLite** - Source of truth for structured data (entries, projects, users)
+- **PostgreSQL** - Source of truth for structured data (entries, projects, users)
 - **ChromaDB** - Vector store for semantic search (memories, entry embeddings)
+- **Drizzle ORM** - Type-safe database queries with connection pooling
 
 ## Data Storage
 
-- **SQLite database**: `~/.calq/calq.db`
-- **ChromaDB**: Embeddings stored in ChromaDB container/instance
-
 In Docker, data is persisted via volumes:
-- `calq-data` - SQLite database
+- `postgres-data` - PostgreSQL database
 - `chroma-data` - ChromaDB embeddings
+
+## Scripts
+
+| Script | Description |
+|--------|-------------|
+| `npm start` | Start the server |
+| `npm run dev` | Start with file watching |
+| `npm run db:push` | Push schema to database |
+| `npm run db:generate` | Generate migrations |
+| `npm run db:migrate` | Run migrations |
+| `npm run db:studio` | Open Drizzle Studio |
 
 ## License
 
