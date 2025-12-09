@@ -3,11 +3,10 @@ FROM node:20-alpine
 WORKDIR /app
 
 COPY package*.json ./
-RUN apk add --no-cache python3 make g++ && \
-    npm ci --omit=dev && \
-    apk del python3 make g++
+RUN npm ci --omit=dev
 
 COPY src ./src
+COPY drizzle.config.js ./
 
 # Data directory will be mounted as a volume
 ENV HOME=/data
