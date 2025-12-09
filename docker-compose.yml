@@ -1,4 +1,4 @@
-name: calq
+name: ${COMPOSE_PROJECT_NAME:-calq-mcp}
 
 services:
   calq:
