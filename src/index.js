@@ -14,6 +14,7 @@ import {
     getProjectEntries,
     getTodaySummary,
     getWeeklySummary,
+    getTeamTodaySummary,
     formatDuration,
     deleteEntry,
     editEntry,
@@ -1000,17 +1001,24 @@ server.tool(
             return { content: [{ type: 'text', text: '🔒 ' + auth.error }] };
         }
 
-        const today = await getTodaySummary(auth.user.id);
-        const users = await getUsers();
+        const summary = await getTeamTodaySummary();
 
-        let text = '👥 **Team Summary** (' + new Date().toLocaleDateString() + ')\n';
-        text += '⏱️ Your total today: ' + today.totalFormatted + '\n\n';
+        let text = '👥 **Team Summary** (' + new Date().toLocaleDateString() + ')\n\n';
 
-        for (const project of today.projects) {
-            text += '**' + project.name + '**: ' + project.durationFormatted + '\n';
+        if (summary.members.length === 0) {
+            text += '_No time logged today yet._\n';
+        } else {
+            for (const member of summary.members) {
+                text += '**' + member.username + '** - ' + member.totalFormatted + ' total\n';
+                for (const project of member.projects) {
+                    text += '  • ' + project.name + ': ' + project.durationFormatted + '\n';
+                }
+                text += '\n';
+            }
         }
 
-        text += '\n👥 ' + users.length + ' team members registered';
+        text += '👥 ' + summary.members.length + ' team member' + (summary.members.length !== 1 ? 's' : '') + ' active today\n';
+        text += '⏱️ Team total: ' + summary.teamTotalFormatted;
 
         return { content: [{ type: 'text', text }] };
     }
