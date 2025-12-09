@@ -1064,7 +1064,14 @@ async function main() {
 
     // Bearer auth middleware for protected endpoints
     const bearerAuth = requireBearerAuth({
-        verifyAccessToken: async (token) => oauthProvider.verifyAccessToken(token)
+        verifyAccessToken: async (token) => {
+            try {
+                return await oauthProvider.verifyAccessToken(token);
+            } catch (error) {
+                console.error('Token verification failed:', error.message);
+                throw error;
+            }
+        }
     });
 
     // MCP endpoint handler (shared for GET, POST, DELETE)
@@ -1110,6 +1117,7 @@ async function main() {
 
                 await transport.handleRequest(req, res, req.body);
             } catch (err) {
+                console.error('MCP request error:', err);
                 if (!res.headersSent) {
                     res.status(500).json({ error: err.message });
                 }
@@ -1133,6 +1141,14 @@ async function main() {
     // Health check (no auth required)
     app.get('/health', (req, res) => {
         res.json({ status: 'ok', sessions: sessions.size });
+    });
+
+    // Global error handler
+    app.use((err, req, res, next) => {
+        console.error('Unhandled error:', err);
+        if (!res.headersSent) {
+            res.status(500).json({ error: err.message });
+        }
     });
 
     const httpServer = app.listen(port, () => {
