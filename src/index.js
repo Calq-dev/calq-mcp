@@ -499,12 +499,18 @@ server.tool(
         client: z.string().optional().describe('Link to a client')
     },
     async ({ content, category, personal, project, client }) => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
         try {
             const memory = await storeMemory(content, {
                 category: category || '',
                 shared: !personal,
                 project: project || null,
-                client: client || null
+                client: client || null,
+                userId: auth.user.id
             });
 
             let text = `🧠 Remembered${personal ? ' (personal)' : ''}${category ? ` [${category}]` : ''}`;
@@ -532,12 +538,18 @@ server.tool(
         client: z.string().optional().describe('Link to a client')
     },
     async ({ content, project, client }) => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
         try {
             const memory = await storeMemory(content, {
                 category: 'idea',
                 shared: true,
                 project: project || null,
-                client: client || null
+                client: client || null,
+                userId: auth.user.id
             });
 
             let text = '💡 **Idea captured!**';
