@@ -1063,16 +1063,26 @@ async function main() {
     });
 
     // Bearer auth middleware for protected endpoints
-    const bearerAuth = requireBearerAuth({
+    const bearerAuthMiddleware = requireBearerAuth({
         verifyAccessToken: async (token) => {
             try {
-                return await oauthProvider.verifyAccessToken(token);
+                const result = await oauthProvider.verifyAccessToken(token);
+                console.log('Token verified for user:', result.userId);
+                return result;
             } catch (error) {
                 console.error('Token verification failed:', error.message);
                 throw error;
             }
         }
     });
+
+    // Wrap to catch errors from the middleware itself
+    const bearerAuth = (req, res, next) => {
+        Promise.resolve(bearerAuthMiddleware(req, res, next)).catch(err => {
+            console.error('Bearer auth middleware error:', err);
+            next(err);
+        });
+    };
 
     // MCP endpoint handler (shared for GET, POST, DELETE)
     async function handleMcpRequest(req, res) {
