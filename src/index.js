@@ -1081,15 +1081,15 @@ async function main() {
         // Run request with user context
         await requestContext.run({ user }, async () => {
             try {
-                const response = await transport.handleRequest(req.body);
-
                 if (newSessionId) {
                     res.setHeader('mcp-session-id', newSessionId);
                 }
 
-                res.json(response);
+                await transport.handleRequest(req, res, req.body);
             } catch (err) {
-                res.status(500).json({ error: err.message });
+                if (!res.headersSent) {
+                    res.status(500).json({ error: err.message });
+                }
             }
         });
     });
