@@ -74,3 +74,50 @@ export const activeTimer = pgTable('active_timer', {
     pausedAt: timestamp('paused_at'),
     pausedDuration: integer('paused_duration').default(0), // Total paused time in minutes
 });
+
+// OAuth registered clients
+export const oauthClients = pgTable('oauth_clients', {
+    clientId: text('client_id').primaryKey(),
+    clientSecret: text('client_secret'),
+    clientName: text('client_name'),
+    redirectUris: text('redirect_uris'), // JSON array
+    clientIdIssuedAt: integer('client_id_issued_at'),
+    createdAt: timestamp('created_at').defaultNow(),
+});
+
+// OAuth access tokens
+export const oauthAccessTokens = pgTable('oauth_access_tokens', {
+    token: text('token').primaryKey(),
+    clientId: text('client_id').notNull(),
+    userId: text('user_id').references(() => users.id),
+    scopes: text('scopes'), // JSON array
+    expiresAt: timestamp('expires_at').notNull(),
+    createdAt: timestamp('created_at').defaultNow(),
+}, (table) => [
+    index('idx_access_tokens_user').on(table.userId),
+    index('idx_access_tokens_expires').on(table.expiresAt),
+]);
+
+// OAuth refresh tokens
+export const oauthRefreshTokens = pgTable('oauth_refresh_tokens', {
+    token: text('token').primaryKey(),
+    clientId: text('client_id').notNull(),
+    userId: text('user_id').references(() => users.id),
+    scopes: text('scopes'), // JSON array
+    createdAt: timestamp('created_at').defaultNow(),
+}, (table) => [
+    index('idx_refresh_tokens_user').on(table.userId),
+]);
+
+// OAuth authorization codes (short-lived, but persist for restarts during auth flow)
+export const oauthAuthCodes = pgTable('oauth_auth_codes', {
+    code: text('code').primaryKey(),
+    clientId: text('client_id').notNull(),
+    userId: text('user_id').references(() => users.id),
+    codeChallenge: text('code_challenge'),
+    redirectUri: text('redirect_uri'),
+    scopes: text('scopes'), // JSON array
+    resource: text('resource'),
+    expiresAt: timestamp('expires_at').notNull(),
+    createdAt: timestamp('created_at').defaultNow(),
+});
