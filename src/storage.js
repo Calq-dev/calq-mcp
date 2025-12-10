@@ -1,5 +1,5 @@
 import { eq, and, or, ilike, sql, desc } from 'drizzle-orm';
-import { db, users, clients, projects, entries, memories, activeTimer } from './db/index.js';
+import { db, users, clients, projects, entries, memories, activeTimer, tasks } from './db/index.js';
 
 // ==================== HELPER FUNCTIONS ====================
 
@@ -938,4 +938,209 @@ export async function deleteUser(userId) {
 
     await db.delete(users).where(eq(users.id, userId.toLowerCase()));
     return user;
+}
+
+// ==================== TASK FUNCTIONS ====================
+
+export async function createTask(title, projectName = null, youtrackId = null, userId = null) {
+    const id = generateId();
+    const user = userId || getCurrentUser();
+
+    let projectId = null;
+    if (projectName) {
+        const project = await getOrCreateProject(projectName);
+        projectId = project.id;
+    }
+
+    await db.insert(tasks).values({
+        id,
+        title,
+        userId: user,
+        projectId,
+        youtrackId,
+        status: 'open',
+    });
+
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, id)).limit(1);
+    return task;
+}
+
+export async function getTasks(options = {}) {
+    const userId = getCurrentUser();
+    let conditions = [];
+
+    // Filter by status
+    if (options.status && options.status !== 'all') {
+        conditions.push(eq(tasks.status, options.status));
+    }
+
+    // Filter by project
+    if (options.project) {
+        const projectId = options.project.toLowerCase().trim().replace(/\s+/g, '-');
+        conditions.push(eq(tasks.projectId, projectId));
+    }
+
+    // Filter by user (mine only)
+    if (options.mine) {
+        conditions.push(eq(tasks.userId, userId));
+    }
+
+    const result = await db
+        .select({
+            id: tasks.id,
+            title: tasks.title,
+            description: tasks.description,
+            userId: tasks.userId,
+            projectId: tasks.projectId,
+            youtrackId: tasks.youtrackId,
+            status: tasks.status,
+            syncedAt: tasks.syncedAt,
+            createdAt: tasks.createdAt,
+            completedAt: tasks.completedAt,
+            projectName: projects.name,
+            username: users.username,
+        })
+        .from(tasks)
+        .leftJoin(projects, eq(tasks.projectId, projects.id))
+        .leftJoin(users, eq(tasks.userId, users.id))
+        .where(conditions.length > 0 ? and(...conditions) : undefined)
+        .orderBy(desc(tasks.createdAt));
+
+    return result;
+}
+
+export async function getTask(taskId) {
+    const [task] = await db
+        .select({
+            id: tasks.id,
+            title: tasks.title,
+            description: tasks.description,
+            userId: tasks.userId,
+            projectId: tasks.projectId,
+            youtrackId: tasks.youtrackId,
+            status: tasks.status,
+            syncedAt: tasks.syncedAt,
+            createdAt: tasks.createdAt,
+            completedAt: tasks.completedAt,
+            projectName: projects.name,
+            username: users.username,
+        })
+        .from(tasks)
+        .leftJoin(projects, eq(tasks.projectId, projects.id))
+        .leftJoin(users, eq(tasks.userId, users.id))
+        .where(eq(tasks.id, taskId))
+        .limit(1);
+
+    return task || null;
+}
+
+export async function getTaskByYoutrackId(youtrackId) {
+    const [task] = await db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.youtrackId, youtrackId))
+        .limit(1);
+
+    return task || null;
+}
+
+export async function completeTask(taskId, userId = null) {
+    const user = userId || getCurrentUser();
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, taskId)).limit(1);
+
+    if (!task) {
+        return { error: 'Task not found' };
+    }
+
+    if (task.status === 'done') {
+        return { error: 'Task already completed', task };
+    }
+
+    await db
+        .update(tasks)
+        .set({
+            status: 'done',
+            completedAt: new Date(),
+        })
+        .where(eq(tasks.id, taskId));
+
+    const [updated] = await db.select().from(tasks).where(eq(tasks.id, taskId)).limit(1);
+    return updated;
+}
+
+export async function updateTask(taskId, updates) {
+    const setValues = {};
+    if (updates.title !== undefined) setValues.title = updates.title;
+    if (updates.description !== undefined) setValues.description = updates.description;
+    if (updates.status !== undefined) setValues.status = updates.status;
+    if (updates.projectId !== undefined) setValues.projectId = updates.projectId;
+    if (updates.youtrackId !== undefined) setValues.youtrackId = updates.youtrackId;
+    if (updates.syncedAt !== undefined) setValues.syncedAt = updates.syncedAt;
+    if (updates.completedAt !== undefined) setValues.completedAt = updates.completedAt;
+
+    if (Object.keys(setValues).length > 0) {
+        await db.update(tasks).set(setValues).where(eq(tasks.id, taskId));
+    }
+
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, taskId)).limit(1);
+    return task;
+}
+
+export async function upsertTaskFromYouTrack(youtrackId, title, description, status, projectId = null) {
+    const existing = await getTaskByYoutrackId(youtrackId);
+
+    if (existing) {
+        // Update existing task
+        return await updateTask(existing.id, {
+            title,
+            description,
+            status,
+            projectId,
+            syncedAt: new Date(),
+        });
+    } else {
+        // Create new task
+        const id = generateId();
+        const user = getCurrentUser();
+
+        await db.insert(tasks).values({
+            id,
+            title,
+            description,
+            userId: user,
+            projectId,
+            youtrackId,
+            status,
+            syncedAt: new Date(),
+        });
+
+        const [task] = await db.select().from(tasks).where(eq(tasks.id, id)).limit(1);
+        return task;
+    }
+}
+
+export async function deleteTask(taskId) {
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, taskId)).limit(1);
+
+    if (!task) return null;
+
+    await db.delete(tasks).where(eq(tasks.id, taskId));
+    return task;
+}
+
+// ==================== USER YOUTRACK TOKEN ====================
+
+export async function setUserYouTrackToken(userId, token) {
+    await db
+        .update(users)
+        .set({ youtrackToken: token })
+        .where(eq(users.id, userId.toLowerCase()));
+
+    const [user] = await db.select().from(users).where(eq(users.id, userId.toLowerCase())).limit(1);
+    return user;
+}
+
+export async function getUserYouTrackToken(userId) {
+    const [user] = await db.select().from(users).where(eq(users.id, userId.toLowerCase())).limit(1);
+    return user?.youtrackToken || null;
 }

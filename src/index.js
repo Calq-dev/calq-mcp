@@ -34,8 +34,18 @@ import {
     getProjectsWithClients,
     updateProject,
     getUnbilledByClient,
-    getUser
+    getUser,
+    // Task functions
+    createTask,
+    getTasks,
+    getTask,
+    completeTask,
+    upsertTaskFromYouTrack,
+    // YouTrack token functions
+    setUserYouTrackToken,
+    getUserYouTrackToken
 } from './storage.js';
+import { getYouTrackClient, mapYouTrackStateToStatus } from './youtrack.js';
 import {
     storeMemory,
     searchMemories,
@@ -83,9 +93,10 @@ server.tool(
         message: z.string().describe('What was accomplished (like a git commit message)'),
         minutes: z.number().nonnegative().optional().describe('Time spent in minutes (defaults to 0)'),
         billable: z.boolean().optional().describe('Whether this is billable work (defaults to true)'),
-        date: z.string().optional().describe('Date for the entry (YYYY-MM-DD format). Defaults to today. Use for backdating or future entries.')
+        date: z.string().optional().describe('Date for the entry (YYYY-MM-DD format). Defaults to today. Use for backdating or future entries.'),
+        task: z.string().optional().describe('Task ID to link this time entry to (syncs to YouTrack if task is linked)')
     },
-    async ({ project, message, minutes, billable, date }) => {
+    async ({ project, message, minutes, billable, date, task }) => {
         const auth = checkUser();
         if (auth.error) {
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
@@ -102,6 +113,25 @@ server.tool(
         }
         if (billable === false) {
             text += `\n🏷️ Non-billable`;
+        }
+
+        // If task specified, sync time to YouTrack
+        if (task && minutes && minutes > 0) {
+            const taskData = await getTask(task);
+            if (taskData && taskData.youtrackId) {
+                try {
+                    const token = await getUserYouTrackToken(auth.user.id);
+                    if (token) {
+                        const yt = getYouTrackClient(token);
+                        await yt.addWorkItem(taskData.youtrackId, minutes, message, date || null);
+                        text += `\n🔗 Synced to YouTrack ${taskData.youtrackId}`;
+                    }
+                } catch (error) {
+                    text += `\n⚠️ YouTrack sync failed: ${error.message}`;
+                }
+            } else if (taskData) {
+                text += `\n📋 Linked to task: ${taskData.title}`;
+            }
         }
 
         return {
@@ -373,15 +403,25 @@ server.tool(
     'start',
     {
         project: z.string().describe('Name of the project to start timing'),
-        description: z.string().optional().describe('What you are working on')
+        description: z.string().optional().describe('What you are working on'),
+        task: z.string().optional().describe('Task ID to link this timer to')
     },
-    async ({ project, description }) => {
+    async ({ project, description, task }) => {
         const auth = checkUser();
         if (auth.error) {
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
 
-        const result = await startTimer(project, description || '', auth.user.id);
+        // If task is specified, include it in description for reference
+        let taskInfo = '';
+        if (task) {
+            const taskData = await getTask(task);
+            if (taskData) {
+                taskInfo = taskData.youtrackId ? ` [${taskData.youtrackId}]` : ` [task:${task}]`;
+            }
+        }
+
+        const result = await startTimer(project, (description || '') + taskInfo, auth.user.id);
 
         if (result.error) {
             const elapsed = formatDuration(Math.round((new Date() - new Date(result.timer.startedAt)) / 60000));
@@ -393,11 +433,13 @@ server.tool(
             };
         }
 
+        let text = `⏱️ Timer started for **${project}**`;
+        if (description) text += `\n\n${description}`;
+        if (task) text += `\n📋 Linked to task${taskInfo}`;
+        text += `\n\nUse the stop tool when you're done.`;
+
         return {
-            content: [{
-                type: 'text',
-                text: `⏱️ Timer started for **${project}**${description ? `\n\n${description}` : ''}\n\nUse the stop tool when you're done.`
-            }]
+            content: [{ type: 'text', text }]
         };
     }
 );
@@ -1102,6 +1144,281 @@ server.tool(
         text += '⏱️ Team total: ' + summary.teamTotalFormatted;
 
         return { content: [{ type: 'text', text }] };
+    }
+);
+
+// ==================== TASK TOOLS ====================
+
+// Tool: List tasks
+server.tool(
+    'tasks',
+    {
+        status: z.enum(['open', 'done', 'all']).optional().describe('Filter by status (default: open)'),
+        project: z.string().optional().describe('Filter by project'),
+        mine: z.boolean().optional().describe('Show only my tasks')
+    },
+    async ({ status, project, mine }) => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const taskList = await getTasks({
+            status: status || 'open',
+            project: project || null,
+            mine: mine || false
+        });
+
+        if (taskList.length === 0) {
+            const statusText = status === 'all' ? '' : (status || 'open');
+            return {
+                content: [{ type: 'text', text: `📋 No ${statusText} tasks${project ? ` for ${project}` : ''}.` }]
+            };
+        }
+
+        let text = `📋 **Tasks** (${taskList.length})\n\n`;
+        for (const task of taskList) {
+            const statusIcon = task.status === 'done' ? '✅' : '⬜';
+            const ytLink = task.youtrackId ? ` [${task.youtrackId}]` : '';
+            const projectTag = task.projectName ? ` 📁 ${task.projectName}` : '';
+            text += `${statusIcon} \`${task.id}\` ${task.title}${ytLink}${projectTag}\n`;
+        }
+
+        return { content: [{ type: 'text', text }] };
+    }
+);
+
+// Tool: Add a task
+server.tool(
+    'add_task',
+    {
+        title: z.string().describe('Task title'),
+        project: z.string().optional().describe('Link to a project'),
+        issue: z.string().optional().describe('YouTrack issue ID (e.g., "PROJ-123")')
+    },
+    async ({ title, project, issue }) => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const task = await createTask(title, project || null, issue || null, auth.user.id);
+
+        let text = `📋 Task added: **${task.title}**`;
+        if (task.projectId) text += `\n📁 Project: ${task.projectId}`;
+        if (task.youtrackId) text += `\n🔗 YouTrack: ${task.youtrackId}`;
+
+        return { content: [{ type: 'text', text }] };
+    }
+);
+
+// Tool: Complete a task
+server.tool(
+    'complete_task',
+    {
+        id: z.string().describe('Task ID'),
+        log_time: z.number().optional().describe('Minutes to log when completing')
+    },
+    async ({ id, log_time }) => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        // Get task first to check if it has YouTrack link
+        const task = await getTask(id);
+        if (!task) {
+            return { content: [{ type: 'text', text: `❌ Task "${id}" not found.` }] };
+        }
+
+        // Complete the task locally
+        const result = await completeTask(id, auth.user.id);
+        if (result.error) {
+            return { content: [{ type: 'text', text: `❌ ${result.error}` }] };
+        }
+
+        let text = `✅ Completed: **${task.title}**`;
+
+        // If task is linked to YouTrack, sync the status
+        if (task.youtrackId) {
+            try {
+                const token = await getUserYouTrackToken(auth.user.id);
+                if (token) {
+                    const yt = getYouTrackClient(token);
+
+                    // Log time if specified
+                    if (log_time && log_time > 0) {
+                        await yt.addWorkItem(task.youtrackId, log_time, `Completed: ${task.title}`);
+                        text += `\n⏱️ Logged ${formatDuration(log_time)} to YouTrack`;
+                    }
+
+                    // Resolve the issue in YouTrack
+                    await yt.resolveIssue(task.youtrackId);
+                    text += `\n🔗 YouTrack ${task.youtrackId} resolved`;
+                } else {
+                    text += `\n⚠️ YouTrack not synced (no token). Use connect_youtrack to link your account.`;
+                }
+            } catch (error) {
+                text += `\n⚠️ YouTrack sync failed: ${error.message}`;
+            }
+        }
+
+        return { content: [{ type: 'text', text }] };
+    }
+);
+
+// ==================== YOUTRACK TOOLS ====================
+
+// Tool: Connect YouTrack account
+server.tool(
+    'connect_youtrack',
+    {
+        token: z.string().describe('Your YouTrack API token (permanent token from YouTrack profile)')
+    },
+    async ({ token }) => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        try {
+            // Verify the token works by making a test request
+            const yt = getYouTrackClient(token);
+            await yt.getIssues('', null, 'me');
+
+            // Save the token
+            await setUserYouTrackToken(auth.user.id, token);
+
+            return {
+                content: [{ type: 'text', text: `🔗 YouTrack connected! You can now use \`issues\` to fetch your tasks.` }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: 'text', text: `❌ Failed to connect: ${error.message}` }]
+            };
+        }
+    }
+);
+
+// Tool: Fetch issues from YouTrack (syncs to local tasks)
+server.tool(
+    'issues',
+    {
+        query: z.string().optional().describe('YouTrack search query'),
+        project: z.string().optional().describe('Filter by YouTrack project'),
+        assignee: z.enum(['me', 'all']).optional().describe('Filter by assignee (default: me)')
+    },
+    async ({ query, project, assignee }) => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const token = await getUserYouTrackToken(auth.user.id);
+        if (!token) {
+            return {
+                content: [{ type: 'text', text: `🔗 YouTrack not connected. Use \`connect_youtrack\` with your API token first.` }]
+            };
+        }
+
+        try {
+            const yt = getYouTrackClient(token);
+            const issues = await yt.getIssues(query || '', project || null, assignee || 'me');
+
+            if (issues.length === 0) {
+                return {
+                    content: [{ type: 'text', text: `📋 No issues found${project ? ` in ${project}` : ''}.` }]
+                };
+            }
+
+            // Sync issues to local tasks
+            let syncedCount = 0;
+            for (const issue of issues) {
+                const status = issue.resolved ? 'done' : 'open';
+                // Use project shortname as local project if available
+                const localProject = issue.project ? issue.project.toLowerCase() : null;
+                await upsertTaskFromYouTrack(issue.id, issue.summary, issue.description || '', status, localProject);
+                syncedCount++;
+            }
+
+            let text = `📋 **YouTrack Issues** (${issues.length})\n\n`;
+            for (const issue of issues) {
+                const statusIcon = issue.resolved ? '✅' : '⬜';
+                text += `${statusIcon} **${issue.id}** - ${issue.summary}\n`;
+                if (issue.project) text += `   📁 ${issue.project}\n`;
+            }
+            text += `\n🔄 Synced ${syncedCount} issues to local tasks.`;
+
+            return { content: [{ type: 'text', text }] };
+        } catch (error) {
+            return {
+                content: [{ type: 'text', text: `❌ YouTrack error: ${error.message}` }]
+            };
+        }
+    }
+);
+
+// Tool: Get issue details, update status, add comment
+server.tool(
+    'issue',
+    {
+        id: z.string().describe('YouTrack issue ID (e.g., "PROJ-123")'),
+        action: z.enum(['get', 'comment', 'resolve']).optional().describe('Action to perform (default: get)'),
+        comment: z.string().optional().describe('Comment text (for comment action)')
+    },
+    async ({ id, action, comment }) => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const token = await getUserYouTrackToken(auth.user.id);
+        if (!token) {
+            return {
+                content: [{ type: 'text', text: `🔗 YouTrack not connected. Use \`connect_youtrack\` with your API token first.` }]
+            };
+        }
+
+        try {
+            const yt = getYouTrackClient(token);
+            const actionType = action || 'get';
+
+            if (actionType === 'get') {
+                const issue = await yt.getIssue(id);
+                let text = `📋 **${issue.id}** - ${issue.summary}\n\n`;
+                text += `🏷️ State: ${issue.state}\n`;
+                text += `📁 Project: ${issue.projectName || issue.project}\n`;
+                if (issue.description) {
+                    text += `\n${issue.description.substring(0, 500)}${issue.description.length > 500 ? '...' : ''}`;
+                }
+                return { content: [{ type: 'text', text }] };
+            }
+
+            if (actionType === 'comment') {
+                if (!comment) {
+                    return { content: [{ type: 'text', text: `❌ Comment text required.` }] };
+                }
+                await yt.addComment(id, comment);
+                return { content: [{ type: 'text', text: `💬 Comment added to ${id}` }] };
+            }
+
+            if (actionType === 'resolve') {
+                await yt.resolveIssue(id);
+
+                // Also update local task if it exists
+                const status = 'done';
+                const issue = await yt.getIssue(id);
+                await upsertTaskFromYouTrack(id, issue.summary, issue.description || '', status);
+
+                return { content: [{ type: 'text', text: `✅ Resolved ${id}` }] };
+            }
+
+            return { content: [{ type: 'text', text: `❌ Unknown action: ${actionType}` }] };
+        } catch (error) {
+            return {
+                content: [{ type: 'text', text: `❌ YouTrack error: ${error.message}` }]
+            };
+        }
     }
 );
 

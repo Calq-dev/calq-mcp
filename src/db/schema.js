@@ -7,6 +7,7 @@ export const users = pgTable('users', {
     email: text('email'),
     role: text('role').default('member'),
     githubId: text('github_id'),
+    youtrackToken: text('youtrack_token'),
     createdAt: timestamp('created_at').defaultNow(),
     lastLogin: timestamp('last_login'),
 });
@@ -33,6 +34,25 @@ export const projects = pgTable('projects', {
     index('idx_projects_client').on(table.clientId),
 ]);
 
+// Tasks table - local tasks with optional YouTrack sync
+export const tasks = pgTable('tasks', {
+    id: text('id').primaryKey(),
+    title: text('title').notNull(),
+    description: text('description'),
+    userId: text('user_id').references(() => users.id),
+    projectId: text('project_id').references(() => projects.id),
+    youtrackId: text('youtrack_id'),  // e.g., "PROJ-123"
+    status: text('status').default('open'),  // 'open', 'done'
+    syncedAt: timestamp('synced_at'),
+    createdAt: timestamp('created_at').defaultNow(),
+    completedAt: timestamp('completed_at'),
+}, (table) => [
+    index('idx_tasks_user').on(table.userId),
+    index('idx_tasks_project').on(table.projectId),
+    index('idx_tasks_youtrack').on(table.youtrackId),
+    index('idx_tasks_status').on(table.status),
+]);
+
 // Entries table - time entries
 export const entries = pgTable('entries', {
     id: text('id').primaryKey(),
@@ -43,10 +63,12 @@ export const entries = pgTable('entries', {
     billable: boolean('billable').default(true),
     billed: boolean('billed').default(false),
     userId: text('user_id').references(() => users.id),
+    taskId: text('task_id').references(() => tasks.id),
     createdAt: timestamp('created_at').defaultNow(),
 }, (table) => [
     index('idx_entries_project').on(table.projectId),
     index('idx_entries_user').on(table.userId),
+    index('idx_entries_task').on(table.taskId),
     index('idx_entries_created').on(table.createdAt),
 ]);
 
