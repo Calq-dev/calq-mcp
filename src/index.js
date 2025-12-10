@@ -1337,7 +1337,7 @@ server.tool(
                 const status = issue.resolved ? 'done' : 'open';
                 // Use project shortname as local project if available
                 const localProject = issue.project ? issue.project.toLowerCase() : null;
-                await upsertTaskFromYouTrack(issue.id, issue.summary, issue.description || '', status, localProject);
+                await upsertTaskFromYouTrack(issue.id, issue.summary, issue.description || '', status, localProject, auth.user.id);
                 syncedCount++;
             }
 
@@ -1408,7 +1408,7 @@ server.tool(
                 // Also update local task if it exists
                 const status = 'done';
                 const issue = await yt.getIssue(id);
-                await upsertTaskFromYouTrack(id, issue.summary, issue.description || '', status);
+                await upsertTaskFromYouTrack(id, issue.summary, issue.description || '', status, null, auth.user.id);
 
                 return { content: [{ type: 'text', text: `✅ Resolved ${id}` }] };
             }

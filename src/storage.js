@@ -1086,7 +1086,7 @@ export async function updateTask(taskId, updates) {
     return task;
 }
 
-export async function upsertTaskFromYouTrack(youtrackId, title, description, status, projectId = null) {
+export async function upsertTaskFromYouTrack(youtrackId, title, description, status, projectId = null, userId = null) {
     const existing = await getTaskByYoutrackId(youtrackId);
 
     if (existing) {
@@ -1101,7 +1101,7 @@ export async function upsertTaskFromYouTrack(youtrackId, title, description, sta
     } else {
         // Create new task
         const id = generateId();
-        const user = getCurrentUser();
+        const user = userId || getCurrentUser();
 
         await db.insert(tasks).values({
             id,
