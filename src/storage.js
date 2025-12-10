@@ -1086,7 +1086,14 @@ export async function updateTask(taskId, updates) {
     return task;
 }
 
-export async function upsertTaskFromYouTrack(youtrackId, title, description, status, projectId = null, userId = null) {
+export async function upsertTaskFromYouTrack(youtrackId, title, description, status, projectName = null, userId = null) {
+    // Resolve project name to project ID if provided
+    let projectId = null;
+    if (projectName) {
+        const project = await getOrCreateProject(projectName);
+        projectId = project.id;
+    }
+
     const existing = await getTaskByYoutrackId(youtrackId);
 
     if (existing) {
