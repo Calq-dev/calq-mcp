@@ -1,21 +1,26 @@
 import crypto from 'crypto';
 import https from 'https';
+import { eq, lt } from 'drizzle-orm';
 import {
     createUser,
     getUser,
     getUsers,
     updateUser
 } from './storage.js';
+import {
+    db,
+    oauthClients,
+    oauthAccessTokens,
+    oauthRefreshTokens,
+    oauthAuthCodes
+} from './db/index.js';
 
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${process.env.MCP_PORT || 3000}`;
 
-// In-memory stores (use Redis/DB in production for multiple instances)
-const authorizationCodes = new Map(); // code -> { clientId, codeChallenge, redirectUri, githubCode, userId, expiresAt }
-const accessTokens = new Map(); // token -> { clientId, userId, scopes, expiresAt }
-const refreshTokens = new Map(); // token -> { clientId, userId, scopes }
-const registeredClients = new Map(); // clientId -> client info
+// In-memory store for pending GitHub auth (short-lived, during redirect only)
+const pendingAuths = new Map();
 
 /**
  * GitHub OAuth helper - exchange code for token
@@ -122,7 +127,24 @@ function generateToken() {
 }
 
 /**
+ * Clean up expired tokens (called periodically)
+ */
+async function cleanupExpiredTokens() {
+    const now = new Date();
+    try {
+        await db.delete(oauthAccessTokens).where(lt(oauthAccessTokens.expiresAt, now));
+        await db.delete(oauthAuthCodes).where(lt(oauthAuthCodes.expiresAt, now));
+    } catch (error) {
+        console.error('Token cleanup error:', error.message);
+    }
+}
+
+// Run cleanup every 10 minutes
+setInterval(cleanupExpiredTokens, 10 * 60 * 1000);
+
+/**
  * OAuth Server Provider implementation for MCP SDK
+ * Uses PostgreSQL for persistence (survives restarts)
  */
 export class GitHubOAuthProvider {
     constructor() {
@@ -131,20 +153,36 @@ export class GitHubOAuthProvider {
 
     get clientsStore() {
         return {
-            getClient: (clientId) => {
-                return registeredClients.get(clientId);
+            getClient: async (clientId) => {
+                const [client] = await db.select().from(oauthClients).where(eq(oauthClients.clientId, clientId)).limit(1);
+                if (!client) return null;
+                return {
+                    client_id: client.clientId,
+                    client_secret: client.clientSecret,
+                    client_name: client.clientName,
+                    redirect_uris: client.redirectUris ? JSON.parse(client.redirectUris) : [],
+                    client_id_issued_at: client.clientIdIssuedAt
+                };
             },
-            registerClient: (clientInfo) => {
+            registerClient: async (clientInfo) => {
                 const clientId = generateToken();
                 const clientSecret = generateToken();
-                const client = {
+                const clientIdIssuedAt = Math.floor(Date.now() / 1000);
+
+                await db.insert(oauthClients).values({
+                    clientId,
+                    clientSecret,
+                    clientName: clientInfo.client_name || 'MCP Client',
+                    redirectUris: JSON.stringify(clientInfo.redirect_uris || []),
+                    clientIdIssuedAt
+                });
+
+                return {
                     ...clientInfo,
                     client_id: clientId,
                     client_secret: clientSecret,
-                    client_id_issued_at: Math.floor(Date.now() / 1000)
+                    client_id_issued_at: clientIdIssuedAt
                 };
-                registeredClients.set(clientId, client);
-                return client;
             }
         };
     }
@@ -156,7 +194,7 @@ export class GitHubOAuthProvider {
         // Store the OAuth params and redirect to GitHub
         const state = generateToken();
 
-        // Store pending authorization
+        // Store pending authorization (in-memory, short-lived during redirect)
         const pendingAuth = {
             clientId: client.client_id,
             codeChallenge: params.codeChallenge,
@@ -166,8 +204,10 @@ export class GitHubOAuthProvider {
             resource: params.resource
         };
 
-        // Use state to link GitHub callback to this auth request
-        authorizationCodes.set(`pending_${state}`, pendingAuth);
+        pendingAuths.set(state, pendingAuth);
+
+        // Auto-cleanup pending auth after 10 minutes
+        setTimeout(() => pendingAuths.delete(state), 10 * 60 * 1000);
 
         // Redirect to GitHub OAuth
         const githubParams = new URLSearchParams({
@@ -184,14 +224,13 @@ export class GitHubOAuthProvider {
      * Handle GitHub callback - called from Express route
      */
     async handleGitHubCallback(code, state) {
-        const pendingKey = `pending_${state}`;
-        const pending = authorizationCodes.get(pendingKey);
+        const pending = pendingAuths.get(state);
 
         if (!pending) {
             throw new Error('Invalid or expired state');
         }
 
-        authorizationCodes.delete(pendingKey);
+        pendingAuths.delete(state);
 
         // Exchange GitHub code for token
         const githubTokenResponse = await exchangeGitHubCode(code);
@@ -207,14 +246,18 @@ export class GitHubOAuthProvider {
 
         // Generate authorization code for the MCP client
         const authCode = generateToken();
-        authorizationCodes.set(authCode, {
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+        // Store auth code in database
+        await db.insert(oauthAuthCodes).values({
+            code: authCode,
             clientId: pending.clientId,
+            userId: user.id,
             codeChallenge: pending.codeChallenge,
             redirectUri: pending.redirectUri,
-            userId: user.id,
-            scopes: pending.scopes,
+            scopes: JSON.stringify(pending.scopes || []),
             resource: pending.resource,
-            expiresAt: Date.now() + 10 * 60 * 1000 // 10 minutes
+            expiresAt
         });
 
         // Build redirect URL back to MCP client
@@ -231,7 +274,7 @@ export class GitHubOAuthProvider {
      * Get code challenge for authorization code
      */
     async challengeForAuthorizationCode(client, authorizationCode) {
-        const authData = authorizationCodes.get(authorizationCode);
+        const [authData] = await db.select().from(oauthAuthCodes).where(eq(oauthAuthCodes.code, authorizationCode)).limit(1);
         if (!authData || authData.clientId !== client.client_id) {
             throw new Error('Invalid authorization code');
         }
@@ -242,7 +285,7 @@ export class GitHubOAuthProvider {
      * Exchange authorization code for tokens
      */
     async exchangeAuthorizationCode(client, authorizationCode, codeVerifier, redirectUri, resource) {
-        const authData = authorizationCodes.get(authorizationCode);
+        const [authData] = await db.select().from(oauthAuthCodes).where(eq(oauthAuthCodes.code, authorizationCode)).limit(1);
 
         if (!authData) {
             throw new Error('Invalid authorization code');
@@ -252,8 +295,8 @@ export class GitHubOAuthProvider {
             throw new Error('Client ID mismatch');
         }
 
-        if (authData.expiresAt < Date.now()) {
-            authorizationCodes.delete(authorizationCode);
+        if (new Date(authData.expiresAt) < new Date()) {
+            await db.delete(oauthAuthCodes).where(eq(oauthAuthCodes.code, authorizationCode));
             throw new Error('Authorization code expired');
         }
 
@@ -269,24 +312,31 @@ export class GitHubOAuthProvider {
         }
 
         // Clean up authorization code (single use)
-        authorizationCodes.delete(authorizationCode);
+        await db.delete(oauthAuthCodes).where(eq(oauthAuthCodes.code, authorizationCode));
 
         // Generate tokens
         const accessToken = generateToken();
         const refreshToken = generateToken();
         const expiresIn = 3600; // 1 hour
+        const expiresAt = new Date(Date.now() + expiresIn * 1000);
 
-        accessTokens.set(accessToken, {
+        const scopes = authData.scopes ? JSON.parse(authData.scopes) : [];
+
+        // Store access token in database
+        await db.insert(oauthAccessTokens).values({
+            token: accessToken,
             clientId: client.client_id,
             userId: authData.userId,
-            scopes: authData.scopes || [],
-            expiresAt: Date.now() + expiresIn * 1000
+            scopes: JSON.stringify(scopes),
+            expiresAt
         });
 
-        refreshTokens.set(refreshToken, {
+        // Store refresh token in database
+        await db.insert(oauthRefreshTokens).values({
+            token: refreshToken,
             clientId: client.client_id,
             userId: authData.userId,
-            scopes: authData.scopes || []
+            scopes: JSON.stringify(scopes)
         });
 
         return {
@@ -301,7 +351,7 @@ export class GitHubOAuthProvider {
      * Exchange refresh token for new access token
      */
     async exchangeRefreshToken(client, refreshToken, scopes, resource) {
-        const tokenData = refreshTokens.get(refreshToken);
+        const [tokenData] = await db.select().from(oauthRefreshTokens).where(eq(oauthRefreshTokens.token, refreshToken)).limit(1);
 
         if (!tokenData || tokenData.clientId !== client.client_id) {
             throw new Error('Invalid refresh token');
@@ -310,12 +360,16 @@ export class GitHubOAuthProvider {
         // Generate new access token
         const accessToken = generateToken();
         const expiresIn = 3600;
+        const expiresAt = new Date(Date.now() + expiresIn * 1000);
 
-        accessTokens.set(accessToken, {
+        const tokenScopes = scopes || (tokenData.scopes ? JSON.parse(tokenData.scopes) : []);
+
+        await db.insert(oauthAccessTokens).values({
+            token: accessToken,
             clientId: client.client_id,
             userId: tokenData.userId,
-            scopes: scopes || tokenData.scopes || [],
-            expiresAt: Date.now() + expiresIn * 1000
+            scopes: JSON.stringify(tokenScopes),
+            expiresAt
         });
 
         return {
@@ -330,24 +384,25 @@ export class GitHubOAuthProvider {
      * Verify access token
      */
     async verifyAccessToken(token) {
-        const tokenData = accessTokens.get(token);
+        const [tokenData] = await db.select().from(oauthAccessTokens).where(eq(oauthAccessTokens.token, token)).limit(1);
 
         if (!tokenData) {
             throw new Error('Invalid access token');
         }
 
-        if (tokenData.expiresAt < Date.now()) {
-            accessTokens.delete(token);
+        if (new Date(tokenData.expiresAt) < new Date()) {
+            await db.delete(oauthAccessTokens).where(eq(oauthAccessTokens.token, token));
             throw new Error('Access token expired');
         }
 
         // Get user info
         const user = await getUser(tokenData.userId);
+        console.log('Token verified for user:', user?.username || tokenData.userId);
 
         return {
             clientId: tokenData.clientId,
-            scopes: tokenData.scopes,
-            expiresAt: Math.floor(tokenData.expiresAt / 1000),
+            scopes: tokenData.scopes ? JSON.parse(tokenData.scopes) : [],
+            expiresAt: Math.floor(new Date(tokenData.expiresAt).getTime() / 1000),
             userId: tokenData.userId,
             user: user
         };
@@ -359,13 +414,9 @@ export class GitHubOAuthProvider {
     async revokeToken(client, request) {
         const token = request.token;
 
-        if (accessTokens.has(token)) {
-            accessTokens.delete(token);
-        }
-
-        if (refreshTokens.has(token)) {
-            refreshTokens.delete(token);
-        }
+        // Try to delete from both tables
+        await db.delete(oauthAccessTokens).where(eq(oauthAccessTokens.token, token));
+        await db.delete(oauthRefreshTokens).where(eq(oauthRefreshTokens.token, token));
     }
 }
 
