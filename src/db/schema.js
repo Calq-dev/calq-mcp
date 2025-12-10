@@ -71,4 +71,6 @@ export const activeTimer = pgTable('active_timer', {
     projectId: text('project_id').references(() => projects.id),
     description: text('description'),
     startedAt: timestamp('started_at'),
+    pausedAt: timestamp('paused_at'),
+    pausedDuration: integer('paused_duration').default(0), // Total paused time in minutes
 });
