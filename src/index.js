@@ -24,6 +24,8 @@ import {
     stopTimer,
     getActiveTimer,
     cancelTimer,
+    pauseTimer,
+    resumeTimer,
     createClient,
     getClients,
     updateClient,
@@ -451,11 +453,24 @@ server.tool(
             };
         }
 
+        let statusIcon = timer.isPaused ? '⏸️' : '⏱️';
+        let statusText = timer.isPaused ? 'Timer paused' : 'Timer running';
+        let text = `${statusIcon} ${statusText}: **${timer.project}** (${timer.elapsedFormatted})`;
+
+        if (timer.description) {
+            text += `\n\n${timer.description}`;
+        }
+
+        if (timer.totalPausedMinutes > 0) {
+            text += `\n\n⏸️ Paused time: ${formatDuration(timer.totalPausedMinutes)}`;
+        }
+
+        if (timer.isPaused) {
+            text += '\n\nUse resume to continue tracking.';
+        }
+
         return {
-            content: [{
-                type: 'text',
-                text: `⏱️ Timer running: **${timer.project}** (${timer.elapsedFormatted})\n\n${timer.description || ''}`
-            }]
+            content: [{ type: 'text', text }]
         };
     }
 );
@@ -483,6 +498,72 @@ server.tool(
                 type: 'text',
                 text: `🚫 Timer cancelled (not saved)\n\nWas tracking: **${timer.project}**`
             }]
+        };
+    }
+);
+
+// Tool: Pause the timer
+server.tool(
+    'pause',
+    {},
+    async () => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const result = await pauseTimer(auth.user.id);
+
+        if (result.error) {
+            if (result.error === 'Timer already paused') {
+                return {
+                    content: [{ type: 'text', text: '⏸️ Timer is already paused. Use resume to continue.' }]
+                };
+            }
+            return {
+                content: [{ type: 'text', text: '❌ No timer running to pause.' }]
+            };
+        }
+
+        return {
+            content: [{
+                type: 'text',
+                text: `⏸️ Timer paused - **${result.project}**\n\n⏱️ ${result.runningFormatted} tracked so far\n\nUse resume to continue.`
+            }]
+        };
+    }
+);
+
+// Tool: Resume a paused timer
+server.tool(
+    'resume',
+    {},
+    async () => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const result = await resumeTimer(auth.user.id);
+
+        if (result.error) {
+            if (result.error === 'Timer is not paused') {
+                return {
+                    content: [{ type: 'text', text: '▶️ Timer is already running. Use pause to pause it.' }]
+                };
+            }
+            return {
+                content: [{ type: 'text', text: '❌ No timer to resume.' }]
+            };
+        }
+
+        let text = `▶️ Timer resumed - **${result.project}**`;
+        if (result.pausedMinutes > 0) {
+            text += `\n\nPaused for ${formatDuration(result.pausedMinutes)}`;
+        }
+
+        return {
+            content: [{ type: 'text', text }]
         };
     }
 );

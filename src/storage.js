@@ -614,7 +614,17 @@ export async function stopTimer(message = null, billable = true, userId = null) 
     }
 
     const startedAt = new Date(timer.startedAt);
-    const minutes = Math.round((Date.now() - startedAt.getTime()) / 60000);
+    let totalElapsed = Math.round((Date.now() - startedAt.getTime()) / 60000);
+
+    // If currently paused, add the current pause duration
+    let currentPauseMinutes = 0;
+    if (timer.pausedAt) {
+        currentPauseMinutes = Math.round((Date.now() - new Date(timer.pausedAt).getTime()) / 60000);
+    }
+
+    // Subtract all paused time from total elapsed
+    const totalPausedMinutes = (timer.pausedDuration || 0) + currentPauseMinutes;
+    const minutes = Math.max(0, totalElapsed - totalPausedMinutes);
 
     const entry = await addEntry(timer.projectId, minutes, message || timer.description || 'Timer session', 'timer', billable, null, user);
 
@@ -625,6 +635,7 @@ export async function stopTimer(message = null, billable = true, userId = null) 
         minutes,
         duration: formatDuration(minutes),
         startedAt: timer.startedAt,
+        pausedMinutes: totalPausedMinutes,
     };
 }
 
@@ -637,6 +648,8 @@ export async function getActiveTimer(userId = null) {
             projectId: activeTimer.projectId,
             description: activeTimer.description,
             startedAt: activeTimer.startedAt,
+            pausedAt: activeTimer.pausedAt,
+            pausedDuration: activeTimer.pausedDuration,
             projectName: projects.name,
         })
         .from(activeTimer)
@@ -648,16 +661,29 @@ export async function getActiveTimer(userId = null) {
     if (!timer || !timer.projectId) return null;
 
     const startedAt = new Date(timer.startedAt);
-    const minutes = Math.round((Date.now() - startedAt.getTime()) / 60000);
+    const totalElapsed = Math.round((Date.now() - startedAt.getTime()) / 60000);
+
+    // Calculate effective running time (excluding pauses)
+    let currentPauseMinutes = 0;
+    if (timer.pausedAt) {
+        currentPauseMinutes = Math.round((Date.now() - new Date(timer.pausedAt).getTime()) / 60000);
+    }
+    const totalPausedMinutes = (timer.pausedDuration || 0) + currentPauseMinutes;
+    const effectiveMinutes = Math.max(0, totalElapsed - totalPausedMinutes);
 
     return {
         project: timer.projectId,
         projectName: timer.projectName,
         description: timer.description,
         startedAt: timer.startedAt,
-        runningMinutes: minutes,
-        runningFormatted: formatDuration(minutes),
-        elapsedFormatted: formatDuration(minutes),
+        isPaused: !!timer.pausedAt,
+        pausedAt: timer.pausedAt,
+        pausedDuration: timer.pausedDuration || 0,
+        currentPauseMinutes,
+        totalPausedMinutes,
+        runningMinutes: effectiveMinutes,
+        runningFormatted: formatDuration(effectiveMinutes),
+        elapsedFormatted: formatDuration(effectiveMinutes),
     };
 }
 
@@ -672,6 +698,67 @@ export async function cancelTimer(userId = null) {
     await db.delete(activeTimer).where(eq(activeTimer.userId, user));
 
     return { cancelled: true, project: timer.projectId };
+}
+
+export async function pauseTimer(userId = null) {
+    const user = userId || getCurrentUser();
+    const [timer] = await db.select().from(activeTimer).where(eq(activeTimer.userId, user)).limit(1);
+
+    if (!timer || !timer.projectId) {
+        return { error: 'No timer running' };
+    }
+
+    if (timer.pausedAt) {
+        return { error: 'Timer already paused', timer };
+    }
+
+    await db
+        .update(activeTimer)
+        .set({ pausedAt: new Date() })
+        .where(eq(activeTimer.userId, user));
+
+    const startedAt = new Date(timer.startedAt);
+    const runningMinutes = Math.round((Date.now() - startedAt.getTime()) / 60000) - (timer.pausedDuration || 0);
+
+    return {
+        paused: true,
+        project: timer.projectId,
+        runningMinutes,
+        runningFormatted: formatDuration(runningMinutes),
+    };
+}
+
+export async function resumeTimer(userId = null) {
+    const user = userId || getCurrentUser();
+    const [timer] = await db.select().from(activeTimer).where(eq(activeTimer.userId, user)).limit(1);
+
+    if (!timer || !timer.projectId) {
+        return { error: 'No timer running' };
+    }
+
+    if (!timer.pausedAt) {
+        return { error: 'Timer is not paused', timer };
+    }
+
+    // Calculate how long it was paused
+    const pausedAt = new Date(timer.pausedAt);
+    const pausedMinutes = Math.round((Date.now() - pausedAt.getTime()) / 60000);
+    const totalPausedDuration = (timer.pausedDuration || 0) + pausedMinutes;
+
+    await db
+        .update(activeTimer)
+        .set({
+            pausedAt: null,
+            pausedDuration: totalPausedDuration,
+        })
+        .where(eq(activeTimer.userId, user));
+
+    return {
+        resumed: true,
+        project: timer.projectId,
+        pausedMinutes,
+        totalPausedDuration,
+    };
 }
 
 // ==================== CLIENT FUNCTIONS ====================
