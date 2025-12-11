@@ -28,6 +28,17 @@ services:
       retries: 3
     restart: unless-stopped
 
+  discord-bot:
+    build: ./discord-bot
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - CALQ_MCP_URL=${BASE_URL:-http://calq:${MCP_PORT:-3000}}/mcp
+    depends_on:
+      calq:
+        condition: service_healthy
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine
     environment:
