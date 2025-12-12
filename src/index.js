@@ -50,7 +50,12 @@ import {
     searchObservations,
     createSessionSummary,
     getSessionSummaries,
-    getSessionSummary
+    getSessionSummary,
+    // Component registry functions
+    publishComponent,
+    getComponents,
+    getComponent,
+    deleteComponent
 } from './storage.js';
 import { getYouTrackClient, mapYouTrackStateToStatus } from './youtrack.js';
 import {
@@ -1906,6 +1911,31 @@ You are a learning extraction agent. Review the conversation and:
 
 Use the \`observe\` tool for each learning. Be concise but capture the essential context.`;
 
+    // Output styles
+    config.files['.claude/output-styles/calq-commit-style.md'] = `---
+description: Concise commit-style output for time tracking
+---
+
+Format your responses as structured summaries:
+- Start with a clear one-line title of what was done
+- List key changes as bullet points
+- Include time estimate if relevant
+- End with any follow-up recommendations
+
+Keep responses concise and actionable. Avoid unnecessary explanation.`;
+
+    config.files['.claude/output-styles/calq-learning.md'] = `---
+description: Learning-focused output that captures insights
+---
+
+When completing tasks, structure your response to highlight learnings:
+1. **What was done**: Brief summary of the work
+2. **What was learned**: Key insights or discoveries about the codebase
+3. **Key patterns**: Any patterns, conventions, or architectural decisions observed
+4. **Gotchas**: Anything surprising or counter-intuitive encountered
+
+This helps build team knowledge over time.`;
+
     return config;
 }
 
@@ -1913,11 +1943,12 @@ Use the \`observe\` tool for each learning. Be concise but capture the essential
 server.tool(
     'install',
     {
-        components: z.array(z.enum(['hooks', 'commands', 'skills', 'agents', 'all'])).optional()
+        components: z.array(z.enum(['hooks', 'commands', 'skills', 'agents', 'output-styles', 'all'])).optional()
             .describe('Components to install (default: all)'),
-        force: z.boolean().optional().describe('Force reinstall even if up to date')
+        force: z.boolean().optional().describe('Force reinstall even if up to date'),
+        include_community: z.boolean().optional().describe('Include team-contributed components (default: true)')
     },
-    async ({ components, force }) => {
+    async ({ components, force, include_community }) => {
         const auth = checkUser();
         if (auth.error) {
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
@@ -1932,6 +1963,8 @@ server.tool(
         const includeCommands = includeAll || components.includes('commands');
         const includeSkills = includeAll || components.includes('skills');
         const includeAgents = includeAll || components.includes('agents');
+        const includeOutputStyles = includeAll || components.includes('output-styles');
+        const includeCommunity = include_community !== false;
 
         const filteredFiles = {};
         for (const [path, content] of Object.entries(config.files)) {
@@ -1945,6 +1978,39 @@ server.tool(
                 filteredFiles[path] = content;
             } else if (path.includes('/agents/') && includeAgents) {
                 filteredFiles[path] = content;
+            } else if (path.includes('/output-styles/') && includeOutputStyles) {
+                filteredFiles[path] = content;
+            }
+        }
+
+        // Add community components from database
+        if (includeCommunity) {
+            const communityComponents = await getComponents({ includeBuiltin: false });
+            for (const comp of communityComponents) {
+                // Map component type to directory
+                const dirMap = {
+                    'agent': 'agents',
+                    'skill': 'skills',
+                    'command': 'commands',
+                    'output-style': 'output-styles',
+                    'hook': 'calq/hooks'
+                };
+                const dir = dirMap[comp.type];
+                if (!dir) continue;
+
+                // Check if this type should be included
+                const shouldInclude = (
+                    (comp.type === 'agent' && includeAgents) ||
+                    (comp.type === 'skill' && includeSkills) ||
+                    (comp.type === 'command' && includeCommands) ||
+                    (comp.type === 'output-style' && includeOutputStyles) ||
+                    (comp.type === 'hook' && includeHooks)
+                );
+
+                if (shouldInclude) {
+                    const ext = comp.type === 'hook' ? 'js' : 'md';
+                    filteredFiles[`.claude/${dir}/${comp.name}.${ext}`] = comp.content;
+                }
             }
         }
 
@@ -2016,7 +2082,7 @@ server.tool(
 server.tool(
     'calq_get_component',
     {
-        component: z.enum(['hooks', 'commands', 'skills', 'agents']).describe('Component type to retrieve'),
+        component: z.enum(['hooks', 'commands', 'skills', 'agents', 'output-styles']).describe('Component type to retrieve'),
         name: z.string().optional().describe('Specific component name (e.g., "calq-reviewer" for agents)')
     },
     async ({ component, name }) => {
@@ -2028,7 +2094,7 @@ server.tool(
         const baseUrl = process.env.BASE_URL || 'https://mcp.calq.nl';
         const config = generateCalqConfig(baseUrl);
 
-        // Filter files by component
+        // Filter files by component from builtin config
         const componentPath = `/${component}/`;
         const files = {};
 
@@ -2041,6 +2107,36 @@ server.tool(
                     }
                 } else {
                     files[path] = content;
+                }
+            }
+        }
+
+        // Also check database for community components
+        const typeMap = {
+            'hooks': 'hook',
+            'commands': 'command',
+            'skills': 'skill',
+            'agents': 'agent',
+            'output-styles': 'output-style'
+        };
+        const dbType = typeMap[component];
+
+        if (dbType) {
+            if (name) {
+                // Fetch specific component from DB
+                const dbComponent = await getComponent(dbType, name);
+                if (dbComponent) {
+                    const ext = dbType === 'hook' ? 'js' : 'md';
+                    const dir = component === 'hooks' ? 'calq/hooks' : component;
+                    files[`.claude/${dir}/${dbComponent.name}.${ext}`] = dbComponent.content;
+                }
+            } else {
+                // Fetch all components of this type from DB
+                const dbComponents = await getComponents({ type: dbType, includeBuiltin: false });
+                for (const comp of dbComponents) {
+                    const ext = dbType === 'hook' ? 'js' : 'md';
+                    const dir = component === 'hooks' ? 'calq/hooks' : component;
+                    files[`.claude/${dir}/${comp.name}.${ext}`] = comp.content;
                 }
             }
         }
@@ -2065,11 +2161,14 @@ server.tool(
     }
 );
 
-// Tool: List available Calq components
+// Tool: List available Calq components (builtin + user-contributed)
 server.tool(
     'calq_list_components',
-    {},
-    async () => {
+    {
+        type: z.enum(['hooks', 'commands', 'skills', 'agents', 'output-styles', 'all']).optional()
+            .describe('Filter by component type (default: all)')
+    },
+    async ({ type }) => {
         const auth = checkUser();
         if (auth.error) {
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
@@ -2078,44 +2177,144 @@ server.tool(
         const baseUrl = process.env.BASE_URL || 'https://mcp.calq.nl';
         const config = generateCalqConfig(baseUrl);
 
-        // Group files by component type
-        const components = {
+        // Get builtin components from config
+        const builtinComponents = {
             hooks: [],
             commands: [],
             skills: [],
-            agents: []
+            agents: [],
+            'output-styles': []
         };
 
         for (const path of Object.keys(config.files)) {
             const filename = path.split('/').pop();
             if (path.includes('/hooks/') && filename.endsWith('.js')) {
-                components.hooks.push(filename.replace('.js', ''));
+                builtinComponents.hooks.push({ name: filename.replace('.js', ''), builtin: true });
             } else if (path.includes('/commands/')) {
-                components.commands.push(filename.replace('.md', ''));
+                builtinComponents.commands.push({ name: filename.replace('.md', ''), builtin: true });
             } else if (path.includes('/skills/')) {
-                components.skills.push(filename.replace('.md', ''));
+                builtinComponents.skills.push({ name: filename.replace('.md', ''), builtin: true });
             } else if (path.includes('/agents/')) {
-                components.agents.push(filename.replace('.md', ''));
+                builtinComponents.agents.push({ name: filename.replace('.md', ''), builtin: true });
+            } else if (path.includes('/output-styles/')) {
+                builtinComponents['output-styles'].push({ name: filename.replace('.md', ''), builtin: true });
             }
+        }
+
+        // Get user-contributed components from database
+        const dbComponents = await getComponents();
+        for (const comp of dbComponents) {
+            if (!builtinComponents[comp.type]) continue;
+            builtinComponents[comp.type].push({
+                name: comp.name,
+                builtin: false,
+                author: comp.authorId,
+                description: comp.description
+            });
         }
 
         let text = `# Calq Components v${CALQ_CONFIG_VERSION}\n\n`;
 
-        text += `## Hooks\n`;
-        for (const h of components.hooks) text += `- ${h}\n`;
+        const typeFilter = type === 'all' ? null : type;
+        const types = typeFilter ? [typeFilter] : ['hooks', 'commands', 'skills', 'agents', 'output-styles'];
 
-        text += `\n## Commands\n`;
-        for (const c of components.commands) text += `- /${c}\n`;
+        for (const t of types) {
+            const items = builtinComponents[t] || [];
+            if (items.length === 0) continue;
 
-        text += `\n## Skills\n`;
-        for (const s of components.skills) text += `- ${s}\n`;
+            text += `## ${t.charAt(0).toUpperCase() + t.slice(1)}\n`;
+            for (const item of items) {
+                const prefix = t === 'commands' ? '/' : '';
+                const badge = item.builtin ? '' : ` *(by ${item.author || 'team'})*`;
+                text += `- ${prefix}${item.name}${badge}\n`;
+                if (item.description && !item.builtin) text += `  ${item.description}\n`;
+            }
+            text += '\n';
+        }
 
-        text += `\n## Agents\n`;
-        for (const a of components.agents) text += `- ${a}\n`;
-
-        text += `\n---\nUse \`install\` to install all, or \`calq_get_component\` for specific ones.`;
+        text += `---\n`;
+        text += `Use \`install\` to install components, \`calq_publish_component\` to share yours.`;
 
         return { content: [{ type: 'text', text }] };
+    }
+);
+
+// Tool: Publish a component to the shared registry
+server.tool(
+    'calq_publish_component',
+    {
+        type: z.enum(['agent', 'skill', 'command', 'output-style']).describe('Type of component'),
+        name: z.string().describe('Component name (e.g., "my-reviewer")'),
+        description: z.string().describe('Brief description of what this component does'),
+        content: z.string().describe('The full content of the component (markdown file content)'),
+        version: z.string().optional().describe('Version string (default: 1.0.0)')
+    },
+    async ({ type, name, description, content, version }) => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        try {
+            const result = await publishComponent({
+                type,
+                name,
+                description,
+                content,
+                authorId: auth.user.id,
+                version: version || '1.0.0'
+            });
+
+            const action = result.isNew ? 'Published' : 'Updated';
+            return {
+                content: [{
+                    type: 'text',
+                    text: `✅ **${action}:** ${type}/${result.name}\n\n` +
+                          `Version: ${result.version}\n` +
+                          `Description: ${description}\n\n` +
+                          `Team members can now install this with \`calq_get_component\`.`
+                }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: 'text', text: `❌ Failed to publish: ${error.message}` }]
+            };
+        }
+    }
+);
+
+// Tool: Delete a component from the registry
+server.tool(
+    'calq_delete_component',
+    {
+        type: z.enum(['agent', 'skill', 'command', 'output-style']).describe('Type of component'),
+        name: z.string().describe('Component name to delete')
+    },
+    async ({ type, name }) => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        try {
+            const deleted = await deleteComponent(type, name);
+            if (!deleted) {
+                return {
+                    content: [{ type: 'text', text: `❌ Component not found: ${type}/${name}` }]
+                };
+            }
+
+            return {
+                content: [{
+                    type: 'text',
+                    text: `🗑️ Deleted: ${type}/${deleted.name}`
+                }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: 'text', text: `❌ Failed to delete: ${error.message}` }]
+            };
+        }
     }
 );
 

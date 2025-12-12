@@ -1,5 +1,5 @@
 import { eq, and, or, ilike, sql, desc } from 'drizzle-orm';
-import { db, users, clients, projects, entries, memories, activeTimer, tasks, observations, sessionSummaries } from './db/index.js';
+import { db, users, clients, projects, entries, memories, activeTimer, tasks, observations, sessionSummaries, calqComponents } from './db/index.js';
 
 // ==================== HELPER FUNCTIONS ====================
 
@@ -1341,4 +1341,94 @@ export async function getSessionSummary(sessionId) {
         filesRead: summary.filesRead ? JSON.parse(summary.filesRead) : [],
         filesEdited: summary.filesEdited ? JSON.parse(summary.filesEdited) : [],
     };
+}
+
+// ==================== CALQ COMPONENTS ====================
+
+export async function publishComponent({
+    type,
+    name,
+    description,
+    content,
+    authorId,
+    version = '1.0.0',
+    isBuiltin = false
+}) {
+    const id = generateId();
+    const normalizedName = name.toLowerCase().replace(/\s+/g, '-');
+
+    // Check if component already exists
+    const existing = await db.select()
+        .from(calqComponents)
+        .where(and(
+            eq(calqComponents.type, type),
+            eq(calqComponents.name, normalizedName)
+        ))
+        .limit(1);
+
+    if (existing.length > 0) {
+        // Update existing
+        await db.update(calqComponents)
+            .set({
+                description,
+                content,
+                version,
+                updatedAt: new Date(),
+            })
+            .where(eq(calqComponents.id, existing[0].id));
+
+        const [updated] = await db.select().from(calqComponents).where(eq(calqComponents.id, existing[0].id)).limit(1);
+        return { ...updated, isNew: false };
+    }
+
+    // Create new
+    await db.insert(calqComponents).values({
+        id,
+        type,
+        name: normalizedName,
+        description,
+        content,
+        authorId,
+        version,
+        isBuiltin,
+    });
+
+    const [component] = await db.select().from(calqComponents).where(eq(calqComponents.id, id)).limit(1);
+    return { ...component, isNew: true };
+}
+
+export async function getComponents({ type, includeBuiltin = true } = {}) {
+    let query = db.select().from(calqComponents);
+
+    const conditions = [];
+    if (type) conditions.push(eq(calqComponents.type, type));
+    if (!includeBuiltin) conditions.push(eq(calqComponents.isBuiltin, false));
+
+    if (conditions.length > 0) {
+        query = query.where(and(...conditions));
+    }
+
+    return await query.orderBy(desc(calqComponents.updatedAt));
+}
+
+export async function getComponent(type, name) {
+    const [component] = await db.select()
+        .from(calqComponents)
+        .where(and(
+            eq(calqComponents.type, type),
+            eq(calqComponents.name, name.toLowerCase())
+        ))
+        .limit(1);
+
+    return component || null;
+}
+
+export async function deleteComponent(type, name) {
+    const component = await getComponent(type, name);
+    if (!component) return null;
+
+    await db.delete(calqComponents)
+        .where(eq(calqComponents.id, component.id));
+
+    return component;
 }
