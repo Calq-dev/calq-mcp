@@ -1983,7 +1983,7 @@ server.tool(
             }
         }
 
-        // Add community components from database
+        // Add community components from database (overrides builtins with same name)
         if (includeCommunity) {
             const communityComponents = await getComponents({ includeBuiltin: false });
             for (const comp of communityComponents) {
@@ -2009,7 +2009,19 @@ server.tool(
 
                 if (shouldInclude) {
                     const ext = comp.type === 'hook' ? 'js' : 'md';
-                    filteredFiles[`.claude/${dir}/${comp.name}.${ext}`] = comp.content;
+                    const filePath = `.claude/${dir}/${comp.name}.${ext}`;
+                    // Community components override builtins - mark if replacing
+                    const isOverride = filteredFiles[filePath] !== undefined;
+                    filteredFiles[filePath] = comp.content;
+                    if (isOverride) {
+                        // Add a comment to indicate this is a community override
+                        if (ext === 'md' && !comp.content.includes('# Community override')) {
+                            filteredFiles[filePath] = comp.content.replace(
+                                /^(---\n)/,
+                                `$1# Community override of builtin by ${comp.authorId || 'team'}\n`
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -2203,14 +2215,29 @@ server.tool(
 
         // Get user-contributed components from database
         const dbComponents = await getComponents();
+
+        // Track which builtins have community overrides
+        const overrides = new Set();
         for (const comp of dbComponents) {
-            if (!builtinComponents[comp.type]) continue;
-            builtinComponents[comp.type].push({
-                name: comp.name,
-                builtin: false,
-                author: comp.authorId,
-                description: comp.description
-            });
+            // Map db type to list type
+            const typeMap = { 'agent': 'agents', 'skill': 'skills', 'command': 'commands', 'output-style': 'output-styles', 'hook': 'hooks' };
+            const listType = typeMap[comp.type];
+            if (!listType || !builtinComponents[listType]) continue;
+
+            // Check if this overrides a builtin
+            const builtinMatch = builtinComponents[listType].find(b => b.name === comp.name && b.builtin);
+            if (builtinMatch) {
+                overrides.add(`${listType}:${comp.name}`);
+                builtinMatch.overriddenBy = comp.authorId || 'team';
+                builtinMatch.overrideDescription = comp.description;
+            } else {
+                builtinComponents[listType].push({
+                    name: comp.name,
+                    builtin: false,
+                    author: comp.authorId,
+                    description: comp.description
+                });
+            }
         }
 
         let text = `# Calq Components v${CALQ_CONFIG_VERSION}\n\n`;
@@ -2225,9 +2252,16 @@ server.tool(
             text += `## ${t.charAt(0).toUpperCase() + t.slice(1)}\n`;
             for (const item of items) {
                 const prefix = t === 'commands' ? '/' : '';
-                const badge = item.builtin ? '' : ` *(by ${item.author || 'team'})*`;
-                text += `- ${prefix}${item.name}${badge}\n`;
-                if (item.description && !item.builtin) text += `  ${item.description}\n`;
+                if (item.builtin && item.overriddenBy) {
+                    // Builtin with community override
+                    text += `- ${prefix}${item.name} *(overridden by ${item.overriddenBy})*\n`;
+                    if (item.overrideDescription) text += `  ${item.overrideDescription}\n`;
+                } else if (item.builtin) {
+                    text += `- ${prefix}${item.name}\n`;
+                } else {
+                    text += `- ${prefix}${item.name} *(by ${item.author || 'team'})*\n`;
+                    if (item.description) text += `  ${item.description}\n`;
+                }
             }
             text += '\n';
         }
