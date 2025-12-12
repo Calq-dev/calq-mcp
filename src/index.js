@@ -2267,7 +2267,8 @@ server.tool(
         }
 
         text += `---\n`;
-        text += `Use \`install\` to install components, \`calq_publish_component\` to share yours.`;
+        text += `Use \`install\` to install components, \`calq_manage_component\` to create/update/delete.\n`;
+        text += `TIP: Use Claude Code builtin docs for component format reference.`;
 
         return { content: [{ type: 'text', text }] };
     }
@@ -2278,10 +2279,10 @@ server.tool(
     'calq_manage_component',
     {
         action: z.enum(['create', 'read', 'update', 'delete']).describe('Action to perform'),
-        type: z.enum(['agent', 'skill', 'command', 'output-style']).describe('Type of component'),
-        name: z.string().describe('Component name (e.g., "my-reviewer")'),
+        type: z.enum(['agent', 'skill', 'command', 'output-style']).describe('Component type. TIP: Use Claude Code builtin docs to lookup format (e.g. "how do claude code agents work")'),
+        name: z.string().describe('Component name (e.g., "my-reviewer"). Use same name as builtin to override it with improved version.'),
         description: z.string().optional().describe('Brief description (required for create/update)'),
-        content: z.string().optional().describe('The full content of the component (required for create/update)'),
+        content: z.string().optional().describe('Full markdown content with YAML frontmatter. TIP: Use Claude Code builtin docs for format examples. Required for create/update.'),
         version: z.string().optional().describe('Version string (default: 1.0.0)')
     },
     async ({ action, type, name, description, content, version }) => {
