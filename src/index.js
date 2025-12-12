@@ -2273,81 +2273,84 @@ server.tool(
     }
 );
 
-// Tool: Publish a component to the shared registry
+// Tool: Manage components in the shared registry (CRUD)
 server.tool(
-    'calq_publish_component',
+    'calq_manage_component',
     {
+        action: z.enum(['create', 'read', 'update', 'delete']).describe('Action to perform'),
         type: z.enum(['agent', 'skill', 'command', 'output-style']).describe('Type of component'),
         name: z.string().describe('Component name (e.g., "my-reviewer")'),
-        description: z.string().describe('Brief description of what this component does'),
-        content: z.string().describe('The full content of the component (markdown file content)'),
+        description: z.string().optional().describe('Brief description (required for create/update)'),
+        content: z.string().optional().describe('The full content of the component (required for create/update)'),
         version: z.string().optional().describe('Version string (default: 1.0.0)')
     },
-    async ({ type, name, description, content, version }) => {
+    async ({ action, type, name, description, content, version }) => {
         const auth = checkUser();
         if (auth.error) {
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
 
         try {
-            const result = await publishComponent({
-                type,
-                name,
-                description,
-                content,
-                authorId: auth.user.id,
-                version: version || '1.0.0'
-            });
-
-            const action = result.isNew ? 'Published' : 'Updated';
-            return {
-                content: [{
-                    type: 'text',
-                    text: `✅ **${action}:** ${type}/${result.name}\n\n` +
-                          `Version: ${result.version}\n` +
-                          `Description: ${description}\n\n` +
-                          `Team members can now install this with \`calq_get_component\`.`
-                }]
-            };
-        } catch (error) {
-            return {
-                content: [{ type: 'text', text: `❌ Failed to publish: ${error.message}` }]
-            };
-        }
-    }
-);
-
-// Tool: Delete a component from the registry
-server.tool(
-    'calq_delete_component',
-    {
-        type: z.enum(['agent', 'skill', 'command', 'output-style']).describe('Type of component'),
-        name: z.string().describe('Component name to delete')
-    },
-    async ({ type, name }) => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
-        }
-
-        try {
-            const deleted = await deleteComponent(type, name);
-            if (!deleted) {
+            // READ - Get component details
+            if (action === 'read') {
+                const comp = await getComponent(type, name);
+                if (!comp) {
+                    return { content: [{ type: 'text', text: `❌ Component not found: ${type}/${name}` }] };
+                }
                 return {
-                    content: [{ type: 'text', text: `❌ Component not found: ${type}/${name}` }]
+                    content: [{
+                        type: 'text',
+                        text: `# ${type}/${comp.name}\n\n` +
+                              `**Version:** ${comp.version}\n` +
+                              `**Author:** ${comp.authorId || 'builtin'}\n` +
+                              `**Description:** ${comp.description || 'No description'}\n\n` +
+                              `## Content\n\n\`\`\`markdown\n${comp.content}\n\`\`\``
+                    }]
                 };
             }
 
-            return {
-                content: [{
-                    type: 'text',
-                    text: `🗑️ Deleted: ${type}/${deleted.name}`
-                }]
-            };
+            // DELETE - Remove component
+            if (action === 'delete') {
+                const deleted = await deleteComponent(type, name);
+                if (!deleted) {
+                    return { content: [{ type: 'text', text: `❌ Component not found: ${type}/${name}` }] };
+                }
+                return { content: [{ type: 'text', text: `🗑️ Deleted: ${type}/${deleted.name}` }] };
+            }
+
+            // CREATE / UPDATE - Publish or update component
+            if (action === 'create' || action === 'update') {
+                if (!content) {
+                    return { content: [{ type: 'text', text: `❌ Content is required for ${action}` }] };
+                }
+                if (!description) {
+                    return { content: [{ type: 'text', text: `❌ Description is required for ${action}` }] };
+                }
+
+                const result = await publishComponent({
+                    type,
+                    name,
+                    description,
+                    content,
+                    authorId: auth.user.id,
+                    version: version || '1.0.0'
+                });
+
+                const actionWord = result.isNew ? 'Created' : 'Updated';
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `✅ **${actionWord}:** ${type}/${result.name}\n\n` +
+                              `Version: ${result.version}\n` +
+                              `Description: ${description}\n\n` +
+                              `Team members can now install this with \`install\`.`
+                    }]
+                };
+            }
+
+            return { content: [{ type: 'text', text: `❌ Unknown action: ${action}` }] };
         } catch (error) {
-            return {
-                content: [{ type: 'text', text: `❌ Failed to delete: ${error.message}` }]
-            };
+            return { content: [{ type: 'text', text: `❌ Failed: ${error.message}` }] };
         }
     }
 );
