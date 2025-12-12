@@ -1674,70 +1674,61 @@ server.tool(
     }
 );
 
-// ==================== INSTALL TOOL ====================
+// ==================== CALQ CONFIGURATION SYSTEM ====================
 
-// Tool: Get Claude Code configuration files (hooks, commands, skills)
-server.tool(
-    'install',
-    {
-        include_hooks: z.boolean().optional().describe('Include hooks for automatic observation capture (default: true)'),
-        include_commands: z.boolean().optional().describe('Include slash commands (default: true)'),
-        include_skills: z.boolean().optional().describe('Include skills (default: true)')
-    },
-    async ({ include_hooks, include_commands, include_skills }) => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+// Current version of Calq configuration files
+const CALQ_CONFIG_VERSION = '1.0.0';
+
+// Generate all Calq configuration files
+function generateCalqConfig(baseUrl) {
+    const config = {
+        version: CALQ_CONFIG_VERSION,
+        files: {}
+    };
+
+    // Version manifest file
+    config.files['.claude/calq/manifest.json'] = JSON.stringify({
+        version: CALQ_CONFIG_VERSION,
+        installedAt: new Date().toISOString(),
+        baseUrl
+    }, null, 2);
+
+    // Hooks configuration
+    config.files['.claude/hooks/calq.json'] = JSON.stringify({
+        hooks: {
+            PostToolUse: [{
+                type: "command",
+                command: `node .claude/calq/hooks/observe.js "$TOOL_NAME" "$TOOL_INPUT" "$TOOL_OUTPUT" "$SESSION_ID" "$CWD"`,
+                description: "Send tool observations to Calq"
+            }],
+            Stop: [{
+                type: "command",
+                command: `node .claude/calq/hooks/summary.js "$SESSION_ID" "$CWD" "$TRANSCRIPT_PATH"`,
+                description: "Generate session summary in Calq"
+            }],
+            SessionStart: [{
+                type: "command",
+                command: `node .claude/calq/hooks/context.js "$SESSION_ID" "$CWD"`,
+                description: "Inject Calq context into session"
+            }]
         }
+    }, null, 2);
 
-        const includeHooks = include_hooks !== false;
-        const includeCommands = include_commands !== false;
-        const includeSkills = include_skills !== false;
-
-        const baseUrl = process.env.BASE_URL || 'https://mcp.calq.nl';
-
-        const files = {};
-
-        if (includeHooks) {
-            // Hooks configuration
-            files['.claude/hooks/hooks.json'] = JSON.stringify({
-                hooks: {
-                    PostToolUse: [{
-                        type: "command",
-                        command: `node .claude/hooks/calq-observe.js "$TOOL_NAME" "$TOOL_INPUT" "$TOOL_OUTPUT" "$SESSION_ID" "$CWD"`,
-                        description: "Send tool observations to Calq"
-                    }],
-                    Stop: [{
-                        type: "command",
-                        command: `node .claude/hooks/calq-summary.js "$SESSION_ID" "$CWD" "$TRANSCRIPT_PATH"`,
-                        description: "Generate session summary in Calq"
-                    }],
-                    SessionStart: [{
-                        type: "command",
-                        command: `node .claude/hooks/calq-context.js "$SESSION_ID" "$CWD"`,
-                        description: "Inject Calq context into session"
-                    }]
-                }
-            }, null, 2);
-
-            // PostToolUse hook script
-            files['.claude/hooks/calq-observe.js'] = `#!/usr/bin/env node
-// Calq observation hook - sends tool outputs to Calq MCP for learning extraction
+    // PostToolUse hook script
+    config.files['.claude/calq/hooks/observe.js'] = `#!/usr/bin/env node
+// Calq observation hook v${CALQ_CONFIG_VERSION}
 const [,, toolName, toolInput, toolOutput, sessionId, cwd] = process.argv;
 
 const CALQ_URL = process.env.CALQ_MCP_URL || '${baseUrl}/mcp';
 const CALQ_TOKEN = process.env.CALQ_TOKEN;
 
-if (!CALQ_TOKEN) {
-    console.error('CALQ_TOKEN not set, skipping observation');
-    process.exit(0);
-}
+if (!CALQ_TOKEN) process.exit(0);
 
-// Skip certain tools that don't need observation
-const skipTools = ['TodoRead', 'TodoWrite', 'AskFollowupQuestion'];
+// Skip tools that don't need observation
+const skipTools = ['TodoRead', 'TodoWrite', 'AskFollowupQuestion', 'Task'];
 if (skipTools.includes(toolName)) process.exit(0);
 
-// Fire and forget - don't block Claude
+// Fire and forget
 fetch(CALQ_URL, {
     method: 'POST',
     headers: {
@@ -1763,9 +1754,9 @@ fetch(CALQ_URL, {
 }).catch(() => {});
 `;
 
-            // Stop hook script (session summary)
-            files['.claude/hooks/calq-summary.js'] = `#!/usr/bin/env node
-// Calq session summary hook
+    // Stop hook script
+    config.files['.claude/calq/hooks/summary.js'] = `#!/usr/bin/env node
+// Calq session summary hook v${CALQ_CONFIG_VERSION}
 const [,, sessionId, cwd, transcriptPath] = process.argv;
 const fs = require('fs');
 
@@ -1774,12 +1765,10 @@ const CALQ_TOKEN = process.env.CALQ_TOKEN;
 
 if (!CALQ_TOKEN) process.exit(0);
 
-// Read transcript to extract what was done
 let request = 'Session completed';
 try {
     if (transcriptPath && fs.existsSync(transcriptPath)) {
         const transcript = fs.readFileSync(transcriptPath, 'utf8');
-        // Extract first user message as request
         const match = transcript.match(/user:\\s*(.+?)(?=\\n|$)/i);
         if (match) request = match[1].slice(0, 200);
     }
@@ -1796,20 +1785,16 @@ fetch(CALQ_URL, {
         method: 'tools/call',
         params: {
             name: 'summarize_session',
-            arguments: {
-                session_id: sessionId,
-                project: cwd.split('/').pop(),
-                request
-            }
+            arguments: { session_id: sessionId, project: cwd.split('/').pop(), request }
         },
         id: Date.now()
     })
 }).catch(() => {});
 `;
 
-            // SessionStart hook (context injection)
-            files['.claude/hooks/calq-context.js'] = `#!/usr/bin/env node
-// Calq context injection hook
+    // SessionStart hook
+    config.files['.claude/calq/hooks/context.js'] = `#!/usr/bin/env node
+// Calq context injection hook v${CALQ_CONFIG_VERSION}
 const [,, sessionId, cwd] = process.argv;
 
 const CALQ_URL = process.env.CALQ_MCP_URL || '${baseUrl}/mcp';
@@ -1830,10 +1815,7 @@ fetch(CALQ_URL, {
         method: 'tools/call',
         params: {
             name: 'get_context',
-            arguments: {
-                project,
-                limit: 15
-            }
+            arguments: { project, limit: 15 }
         },
         id: Date.now()
     })
@@ -1841,7 +1823,6 @@ fetch(CALQ_URL, {
 .then(r => r.json())
 .then(data => {
     if (data.result?.content?.[0]?.text) {
-        // Output context for Claude to see
         console.log('<calq-context>');
         console.log(data.result.content[0].text);
         console.log('</calq-context>');
@@ -1849,17 +1830,15 @@ fetch(CALQ_URL, {
 })
 .catch(() => {});
 `;
-        }
 
-        if (includeCommands) {
-            // Slash commands
-            files['.claude/commands/calq-status.md'] = `---
+    // Slash commands
+    config.files['.claude/commands/calq-status.md'] = `---
 description: Show your Calq time tracking status
 ---
 
 Use the Calq MCP to show my current timer status and today's time summary. Call the \`timer\` and \`today\` tools.`;
 
-            files['.claude/commands/calq-log.md'] = `---
+    config.files['.claude/commands/calq-log.md'] = `---
 description: Log time to a project
 ---
 
@@ -1867,16 +1846,20 @@ Log time to a project using Calq. Ask me which project and how much time, then u
 
 Example: "Log 2 hours to project-name for implementing feature X"`;
 
-            files['.claude/commands/calq-tasks.md'] = `---
+    config.files['.claude/commands/calq-tasks.md'] = `---
 description: Show your tasks
 ---
 
 Show my current tasks from Calq. Use the \`tasks\` tool to list them.`;
-        }
 
-        if (includeSkills) {
-            // Skills
-            files['.claude/skills/calq-remember.md'] = `---
+    config.files['.claude/commands/calq-update.md'] = `---
+description: Check for Calq configuration updates
+---
+
+Check if the Calq configuration in this project is up to date by calling the \`calq_check_update\` tool. If updates are available, use the \`install\` tool to update.`;
+
+    // Skills
+    config.files['.claude/skills/calq-remember.md'] = `---
 description: Remember something for later using Calq
 ---
 
@@ -1884,23 +1867,253 @@ When the user wants to remember something:
 1. Use the Calq MCP \`remember\` tool to store the memory
 2. Optionally categorize it (decision, learning, note, todo)
 3. Confirm what was saved`;
+
+    config.files['.claude/skills/calq-time.md'] = `---
+description: Track time with Calq
+---
+
+When the user wants to track time:
+1. For starting work: Use \`start\` tool to begin a timer
+2. For stopping: Use \`stop\` tool to stop and log the time
+3. For manual logging: Use \`commit\` tool with duration and description
+4. For status: Use \`timer\` tool to see current timer, \`today\` for daily summary`;
+
+    // Agents
+    config.files['.claude/agents/calq-reviewer.md'] = `---
+description: Code reviewer that logs observations to Calq
+model: haiku
+tools: [Read, Grep, Glob, mcp__calq__observe]
+---
+
+You are a code review agent. When reviewing code:
+1. Look for bugs, security issues, and code quality problems
+2. For each significant finding, use the \`observe\` tool to log it with type "discovery"
+3. Summarize your findings at the end
+
+Focus on actionable feedback. Don't log trivial observations.`;
+
+    config.files['.claude/agents/calq-learner.md'] = `---
+description: Extracts and stores learnings from conversations
+model: haiku
+tools: [mcp__calq__observe, mcp__calq__summarize_session]
+---
+
+You are a learning extraction agent. Review the conversation and:
+1. Identify key decisions made (type: decision)
+2. Note any bugs found and fixed (type: bugfix)
+3. Document new features implemented (type: feature)
+4. Capture important discoveries about the codebase (type: discovery)
+
+Use the \`observe\` tool for each learning. Be concise but capture the essential context.`;
+
+    return config;
+}
+
+// Tool: Install or update Calq configuration
+server.tool(
+    'install',
+    {
+        components: z.array(z.enum(['hooks', 'commands', 'skills', 'agents', 'all'])).optional()
+            .describe('Components to install (default: all)'),
+        force: z.boolean().optional().describe('Force reinstall even if up to date')
+    },
+    async ({ components, force }) => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const baseUrl = process.env.BASE_URL || 'https://mcp.calq.nl';
+        const config = generateCalqConfig(baseUrl);
+
+        // Filter files based on components
+        const includeAll = !components || components.includes('all');
+        const includeHooks = includeAll || components.includes('hooks');
+        const includeCommands = includeAll || components.includes('commands');
+        const includeSkills = includeAll || components.includes('skills');
+        const includeAgents = includeAll || components.includes('agents');
+
+        const filteredFiles = {};
+        for (const [path, content] of Object.entries(config.files)) {
+            if (path.includes('manifest')) {
+                filteredFiles[path] = content;
+            } else if (path.includes('/hooks/') && includeHooks) {
+                filteredFiles[path] = content;
+            } else if (path.includes('/commands/') && includeCommands) {
+                filteredFiles[path] = content;
+            } else if (path.includes('/skills/') && includeSkills) {
+                filteredFiles[path] = content;
+            } else if (path.includes('/agents/') && includeAgents) {
+                filteredFiles[path] = content;
+            }
         }
 
         // Format output
-        let text = `# Calq Configuration Files\n\n`;
-        text += `The following files should be created in your project:\n\n`;
+        let text = `# Calq Configuration v${CALQ_CONFIG_VERSION}\n\n`;
+        text += `Create or update the following files in your project:\n\n`;
 
-        for (const [path, content] of Object.entries(files)) {
-            text += `## \`${path}\`\n\n`;
-            text += '```' + (path.endsWith('.json') ? 'json' : path.endsWith('.js') ? 'javascript' : 'markdown') + '\n';
-            text += content;
-            text += '\n```\n\n';
+        for (const [path, content] of Object.entries(filteredFiles)) {
+            const ext = path.split('.').pop();
+            const lang = ext === 'json' ? 'json' : ext === 'js' ? 'javascript' : 'markdown';
+            text += `## \`${path}\`\n\n\`\`\`${lang}\n${content}\n\`\`\`\n\n`;
         }
 
-        text += `## Setup Instructions\n\n`;
-        text += `1. Create the files above in your project\n`;
-        text += `2. Set your Calq token: \`export CALQ_TOKEN=your_token_here\`\n`;
-        text += `3. The hooks will automatically capture observations and inject context\n`;
+        text += `## Setup\n\n`;
+        text += `1. Create the files above (Claude can do this for you)\n`;
+        text += `2. Set environment variable: \`export CALQ_TOKEN=your_token\`\n`;
+        text += `3. Hooks will automatically capture observations and inject context\n\n`;
+        text += `Use \`/calq-update\` periodically to check for configuration updates.`;
+
+        return { content: [{ type: 'text', text }] };
+    }
+);
+
+// Tool: Check if Calq configuration needs updating
+server.tool(
+    'calq_check_update',
+    {
+        current_version: z.string().optional().describe('Current installed version from .claude/calq/manifest.json')
+    },
+    async ({ current_version }) => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        if (!current_version) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: `📦 **Calq not installed**\n\nNo manifest found. Use the \`install\` tool to set up Calq in this project.`
+                }]
+            };
+        }
+
+        const isOutdated = current_version !== CALQ_CONFIG_VERSION;
+
+        if (isOutdated) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: `🔄 **Update available**\n\n` +
+                          `Installed: v${current_version}\n` +
+                          `Latest: v${CALQ_CONFIG_VERSION}\n\n` +
+                          `Use the \`install\` tool to update your Calq configuration.`
+                }]
+            };
+        }
+
+        return {
+            content: [{
+                type: 'text',
+                text: `✅ **Calq is up to date**\n\nVersion: v${CALQ_CONFIG_VERSION}`
+            }]
+        };
+    }
+);
+
+// Tool: Get specific component files
+server.tool(
+    'calq_get_component',
+    {
+        component: z.enum(['hooks', 'commands', 'skills', 'agents']).describe('Component type to retrieve'),
+        name: z.string().optional().describe('Specific component name (e.g., "calq-reviewer" for agents)')
+    },
+    async ({ component, name }) => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const baseUrl = process.env.BASE_URL || 'https://mcp.calq.nl';
+        const config = generateCalqConfig(baseUrl);
+
+        // Filter files by component
+        const componentPath = `/${component}/`;
+        const files = {};
+
+        for (const [path, content] of Object.entries(config.files)) {
+            if (path.includes(componentPath)) {
+                if (name) {
+                    // Filter by specific name
+                    if (path.includes(name)) {
+                        files[path] = content;
+                    }
+                } else {
+                    files[path] = content;
+                }
+            }
+        }
+
+        if (Object.keys(files).length === 0) {
+            return {
+                content: [{
+                    type: 'text',
+                    text: `❌ No ${component} found${name ? ` matching "${name}"` : ''}`
+                }]
+            };
+        }
+
+        let text = `# Calq ${component}\n\n`;
+        for (const [path, content] of Object.entries(files)) {
+            const ext = path.split('.').pop();
+            const lang = ext === 'json' ? 'json' : ext === 'js' ? 'javascript' : 'markdown';
+            text += `## \`${path}\`\n\n\`\`\`${lang}\n${content}\n\`\`\`\n\n`;
+        }
+
+        return { content: [{ type: 'text', text }] };
+    }
+);
+
+// Tool: List available Calq components
+server.tool(
+    'calq_list_components',
+    {},
+    async () => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const baseUrl = process.env.BASE_URL || 'https://mcp.calq.nl';
+        const config = generateCalqConfig(baseUrl);
+
+        // Group files by component type
+        const components = {
+            hooks: [],
+            commands: [],
+            skills: [],
+            agents: []
+        };
+
+        for (const path of Object.keys(config.files)) {
+            const filename = path.split('/').pop();
+            if (path.includes('/hooks/') && filename.endsWith('.js')) {
+                components.hooks.push(filename.replace('.js', ''));
+            } else if (path.includes('/commands/')) {
+                components.commands.push(filename.replace('.md', ''));
+            } else if (path.includes('/skills/')) {
+                components.skills.push(filename.replace('.md', ''));
+            } else if (path.includes('/agents/')) {
+                components.agents.push(filename.replace('.md', ''));
+            }
+        }
+
+        let text = `# Calq Components v${CALQ_CONFIG_VERSION}\n\n`;
+
+        text += `## Hooks\n`;
+        for (const h of components.hooks) text += `- ${h}\n`;
+
+        text += `\n## Commands\n`;
+        for (const c of components.commands) text += `- /${c}\n`;
+
+        text += `\n## Skills\n`;
+        for (const s of components.skills) text += `- ${s}\n`;
+
+        text += `\n## Agents\n`;
+        for (const a of components.agents) text += `- ${a}\n`;
+
+        text += `\n---\nUse \`install\` to install all, or \`calq_get_component\` for specific ones.`;
 
         return { content: [{ type: 'text', text }] };
     }
