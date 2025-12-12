@@ -143,3 +143,51 @@ export const oauthAuthCodes = pgTable('oauth_auth_codes', {
     expiresAt: timestamp('expires_at').notNull(),
     createdAt: timestamp('created_at').defaultNow(),
 });
+
+// Observations table - structured learnings from Claude Code sessions
+export const observations = pgTable('observations', {
+    id: text('id').primaryKey(),
+    sessionId: text('session_id'),  // Claude session ID
+    userId: text('user_id').references(() => users.id),
+    project: text('project'),  // Project name/path
+    type: text('type'),  // bugfix, feature, refactor, discovery, decision, change
+    title: text('title').notNull(),
+    subtitle: text('subtitle'),
+    narrative: text('narrative'),
+    facts: text('facts'),  // JSON array of fact strings
+    concepts: text('concepts'),  // JSON array: how-it-works, problem-solution, pattern, gotcha, trade-off
+    filesRead: text('files_read'),  // JSON array of file paths
+    filesModified: text('files_modified'),  // JSON array of file paths
+    toolName: text('tool_name'),  // Tool that triggered this observation
+    toolInput: text('tool_input'),  // Tool input (sanitized)
+    discoveryTokens: integer('discovery_tokens'),  // Token cost for ROI tracking
+    createdAt: timestamp('created_at').defaultNow(),
+}, (table) => [
+    index('idx_observations_session').on(table.sessionId),
+    index('idx_observations_user').on(table.userId),
+    index('idx_observations_project').on(table.project),
+    index('idx_observations_type').on(table.type),
+    index('idx_observations_created').on(table.createdAt),
+]);
+
+// Session summaries - end-of-session synthesis
+export const sessionSummaries = pgTable('session_summaries', {
+    id: text('id').primaryKey(),
+    sessionId: text('session_id').unique(),  // Claude session ID
+    userId: text('user_id').references(() => users.id),
+    project: text('project'),
+    request: text('request'),  // What user asked for
+    investigated: text('investigated'),  // What was looked into
+    learned: text('learned'),  // Key insights discovered
+    completed: text('completed'),  // What was delivered
+    nextSteps: text('next_steps'),  // Recommended follow-ups
+    notes: text('notes'),  // Additional context
+    filesRead: text('files_read'),  // JSON array
+    filesEdited: text('files_edited'),  // JSON array
+    discoveryTokens: integer('discovery_tokens'),
+    createdAt: timestamp('created_at').defaultNow(),
+}, (table) => [
+    index('idx_session_summaries_user').on(table.userId),
+    index('idx_session_summaries_project').on(table.project),
+    index('idx_session_summaries_created').on(table.createdAt),
+]);

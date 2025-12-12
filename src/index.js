@@ -43,7 +43,14 @@ import {
     upsertTaskFromYouTrack,
     // YouTrack token functions
     setUserYouTrackToken,
-    getUserYouTrackToken
+    getUserYouTrackToken,
+    // Observation functions
+    createObservation,
+    getObservations,
+    searchObservations,
+    createSessionSummary,
+    getSessionSummaries,
+    getSessionSummary
 } from './storage.js';
 import { getYouTrackClient, mapYouTrackStateToStatus } from './youtrack.js';
 import {
@@ -1419,6 +1426,483 @@ server.tool(
                 content: [{ type: 'text', text: `❌ YouTrack error: ${error.message}` }]
             };
         }
+    }
+);
+
+// ==================== OBSERVATION TOOLS ====================
+
+// Tool: Store an observation from a Claude Code session
+server.tool(
+    'observe',
+    {
+        session_id: z.string().describe('Claude session ID'),
+        project: z.string().describe('Project name or path'),
+        type: z.enum(['bugfix', 'feature', 'refactor', 'discovery', 'decision', 'change']).describe('Type of observation'),
+        title: z.string().describe('Short title for the observation'),
+        subtitle: z.string().optional().describe('One sentence explanation'),
+        narrative: z.string().optional().describe('Full context explanation'),
+        facts: z.array(z.string()).optional().describe('Array of self-contained fact statements'),
+        concepts: z.array(z.enum(['how-it-works', 'why-it-exists', 'problem-solution', 'gotcha', 'pattern', 'trade-off'])).optional().describe('Concept tags'),
+        files_read: z.array(z.string()).optional().describe('Files that were read'),
+        files_modified: z.array(z.string()).optional().describe('Files that were modified'),
+        tool_name: z.string().optional().describe('Tool that triggered this observation'),
+        tool_input: z.string().optional().describe('Tool input (sanitized)')
+    },
+    async ({ session_id, project, type, title, subtitle, narrative, facts, concepts, files_read, files_modified, tool_name, tool_input }) => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        try {
+            const observation = await createObservation({
+                sessionId: session_id,
+                userId: auth.user.id,
+                project,
+                type,
+                title,
+                subtitle,
+                narrative,
+                facts,
+                concepts,
+                filesRead: files_read,
+                filesModified: files_modified,
+                toolName: tool_name,
+                toolInput: tool_input
+            });
+
+            return {
+                content: [{ type: 'text', text: `📝 Observation stored: ${title}` }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: 'text', text: `❌ Failed to store observation: ${error.message}` }]
+            };
+        }
+    }
+);
+
+// Tool: Create a session summary
+server.tool(
+    'summarize_session',
+    {
+        session_id: z.string().describe('Claude session ID'),
+        project: z.string().describe('Project name or path'),
+        request: z.string().describe('What the user asked for'),
+        investigated: z.string().optional().describe('What was looked into'),
+        learned: z.string().optional().describe('Key insights discovered'),
+        completed: z.string().optional().describe('What was delivered'),
+        next_steps: z.string().optional().describe('Recommended follow-ups'),
+        notes: z.string().optional().describe('Additional context'),
+        files_read: z.array(z.string()).optional().describe('Files that were read'),
+        files_edited: z.array(z.string()).optional().describe('Files that were edited')
+    },
+    async ({ session_id, project, request, investigated, learned, completed, next_steps, notes, files_read, files_edited }) => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        try {
+            const summary = await createSessionSummary({
+                sessionId: session_id,
+                userId: auth.user.id,
+                project,
+                request,
+                investigated,
+                learned,
+                completed,
+                nextSteps: next_steps,
+                notes,
+                filesRead: files_read,
+                filesEdited: files_edited
+            });
+
+            return {
+                content: [{ type: 'text', text: `📋 Session summary saved for: ${request.slice(0, 50)}...` }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: 'text', text: `❌ Failed to save summary: ${error.message}` }]
+            };
+        }
+    }
+);
+
+// Tool: Get context for a session (observations + summaries)
+server.tool(
+    'get_context',
+    {
+        project: z.string().describe('Project name or path'),
+        limit: z.number().optional().describe('Max observations to return (default: 20)'),
+        include_summaries: z.boolean().optional().describe('Include recent session summaries (default: true)')
+    },
+    async ({ project, limit, include_summaries }) => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        try {
+            const maxObs = limit || 20;
+            const includeSummaries = include_summaries !== false;
+
+            // Get recent observations for this project
+            const obs = await getObservations({
+                project,
+                userId: auth.user.id,
+                limit: maxObs
+            });
+
+            // Get recent session summaries
+            const summaries = includeSummaries ? await getSessionSummaries({
+                project,
+                userId: auth.user.id,
+                limit: 5
+            }) : [];
+
+            if (obs.length === 0 && summaries.length === 0) {
+                return {
+                    content: [{ type: 'text', text: `📭 No context found for project: ${project}` }]
+                };
+            }
+
+            // Format context for injection
+            let text = `# Context for ${project}\n\n`;
+
+            if (summaries.length > 0) {
+                text += `## Recent Sessions\n\n`;
+                for (const s of summaries) {
+                    text += `### ${s.request}\n`;
+                    if (s.completed) text += `**Completed:** ${s.completed}\n`;
+                    if (s.learned) text += `**Learned:** ${s.learned}\n`;
+                    if (s.nextSteps) text += `**Next:** ${s.nextSteps}\n`;
+                    text += '\n';
+                }
+            }
+
+            if (obs.length > 0) {
+                text += `## Observations (${obs.length})\n\n`;
+
+                // Group by type
+                const typeIcons = {
+                    bugfix: '🐛',
+                    feature: '✨',
+                    refactor: '♻️',
+                    discovery: '🔍',
+                    decision: '🎯',
+                    change: '📝'
+                };
+
+                for (const o of obs) {
+                    const icon = typeIcons[o.type] || '📌';
+                    text += `${icon} **${o.title}**`;
+                    if (o.subtitle) text += ` - ${o.subtitle}`;
+                    text += '\n';
+                    if (o.facts && o.facts.length > 0) {
+                        for (const fact of o.facts.slice(0, 3)) {
+                            text += `  • ${fact}\n`;
+                        }
+                    }
+                }
+            }
+
+            return { content: [{ type: 'text', text }] };
+        } catch (error) {
+            return {
+                content: [{ type: 'text', text: `❌ Failed to get context: ${error.message}` }]
+            };
+        }
+    }
+);
+
+// Tool: Search observations
+server.tool(
+    'search_observations',
+    {
+        query: z.string().describe('Search query'),
+        project: z.string().optional().describe('Filter by project'),
+        type: z.enum(['bugfix', 'feature', 'refactor', 'discovery', 'decision', 'change']).optional().describe('Filter by type'),
+        limit: z.number().optional().describe('Max results (default: 10)')
+    },
+    async ({ query, project, type, limit }) => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        try {
+            const results = await searchObservations(query, {
+                project,
+                type,
+                userId: auth.user.id,
+                limit: limit || 10
+            });
+
+            if (results.length === 0) {
+                return {
+                    content: [{ type: 'text', text: `🔍 No observations found for: "${query}"` }]
+                };
+            }
+
+            const typeIcons = {
+                bugfix: '🐛',
+                feature: '✨',
+                refactor: '♻️',
+                discovery: '🔍',
+                decision: '🎯',
+                change: '📝'
+            };
+
+            let text = `🔍 **Search Results** (${results.length})\n\n`;
+            for (const o of results) {
+                const icon = typeIcons[o.type] || '📌';
+                text += `${icon} **${o.title}**`;
+                if (o.project) text += ` (${o.project})`;
+                text += '\n';
+                if (o.subtitle) text += `   ${o.subtitle}\n`;
+                if (o.narrative) text += `   ${o.narrative.slice(0, 150)}...\n`;
+                text += '\n';
+            }
+
+            return { content: [{ type: 'text', text }] };
+        } catch (error) {
+            return {
+                content: [{ type: 'text', text: `❌ Search failed: ${error.message}` }]
+            };
+        }
+    }
+);
+
+// ==================== INSTALL TOOL ====================
+
+// Tool: Get Claude Code configuration files (hooks, commands, skills)
+server.tool(
+    'install',
+    {
+        include_hooks: z.boolean().optional().describe('Include hooks for automatic observation capture (default: true)'),
+        include_commands: z.boolean().optional().describe('Include slash commands (default: true)'),
+        include_skills: z.boolean().optional().describe('Include skills (default: true)')
+    },
+    async ({ include_hooks, include_commands, include_skills }) => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        const includeHooks = include_hooks !== false;
+        const includeCommands = include_commands !== false;
+        const includeSkills = include_skills !== false;
+
+        const baseUrl = process.env.BASE_URL || 'https://mcp.calq.nl';
+
+        const files = {};
+
+        if (includeHooks) {
+            // Hooks configuration
+            files['.claude/hooks/hooks.json'] = JSON.stringify({
+                hooks: {
+                    PostToolUse: [{
+                        type: "command",
+                        command: `node .claude/hooks/calq-observe.js "$TOOL_NAME" "$TOOL_INPUT" "$TOOL_OUTPUT" "$SESSION_ID" "$CWD"`,
+                        description: "Send tool observations to Calq"
+                    }],
+                    Stop: [{
+                        type: "command",
+                        command: `node .claude/hooks/calq-summary.js "$SESSION_ID" "$CWD" "$TRANSCRIPT_PATH"`,
+                        description: "Generate session summary in Calq"
+                    }],
+                    SessionStart: [{
+                        type: "command",
+                        command: `node .claude/hooks/calq-context.js "$SESSION_ID" "$CWD"`,
+                        description: "Inject Calq context into session"
+                    }]
+                }
+            }, null, 2);
+
+            // PostToolUse hook script
+            files['.claude/hooks/calq-observe.js'] = `#!/usr/bin/env node
+// Calq observation hook - sends tool outputs to Calq MCP for learning extraction
+const [,, toolName, toolInput, toolOutput, sessionId, cwd] = process.argv;
+
+const CALQ_URL = process.env.CALQ_MCP_URL || '${baseUrl}/mcp';
+const CALQ_TOKEN = process.env.CALQ_TOKEN;
+
+if (!CALQ_TOKEN) {
+    console.error('CALQ_TOKEN not set, skipping observation');
+    process.exit(0);
+}
+
+// Skip certain tools that don't need observation
+const skipTools = ['TodoRead', 'TodoWrite', 'AskFollowupQuestion'];
+if (skipTools.includes(toolName)) process.exit(0);
+
+// Fire and forget - don't block Claude
+fetch(CALQ_URL, {
+    method: 'POST',
+    headers: {
+        'Content-Type': 'application/json',
+        'Authorization': \`Bearer \${CALQ_TOKEN}\`
+    },
+    body: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'tools/call',
+        params: {
+            name: 'observe',
+            arguments: {
+                session_id: sessionId,
+                project: cwd.split('/').pop(),
+                type: 'change',
+                title: \`\${toolName} execution\`,
+                tool_name: toolName,
+                tool_input: toolInput?.slice(0, 1000)
+            }
+        },
+        id: Date.now()
+    })
+}).catch(() => {});
+`;
+
+            // Stop hook script (session summary)
+            files['.claude/hooks/calq-summary.js'] = `#!/usr/bin/env node
+// Calq session summary hook
+const [,, sessionId, cwd, transcriptPath] = process.argv;
+const fs = require('fs');
+
+const CALQ_URL = process.env.CALQ_MCP_URL || '${baseUrl}/mcp';
+const CALQ_TOKEN = process.env.CALQ_TOKEN;
+
+if (!CALQ_TOKEN) process.exit(0);
+
+// Read transcript to extract what was done
+let request = 'Session completed';
+try {
+    if (transcriptPath && fs.existsSync(transcriptPath)) {
+        const transcript = fs.readFileSync(transcriptPath, 'utf8');
+        // Extract first user message as request
+        const match = transcript.match(/user:\\s*(.+?)(?=\\n|$)/i);
+        if (match) request = match[1].slice(0, 200);
+    }
+} catch (e) {}
+
+fetch(CALQ_URL, {
+    method: 'POST',
+    headers: {
+        'Content-Type': 'application/json',
+        'Authorization': \`Bearer \${CALQ_TOKEN}\`
+    },
+    body: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'tools/call',
+        params: {
+            name: 'summarize_session',
+            arguments: {
+                session_id: sessionId,
+                project: cwd.split('/').pop(),
+                request
+            }
+        },
+        id: Date.now()
+    })
+}).catch(() => {});
+`;
+
+            // SessionStart hook (context injection)
+            files['.claude/hooks/calq-context.js'] = `#!/usr/bin/env node
+// Calq context injection hook
+const [,, sessionId, cwd] = process.argv;
+
+const CALQ_URL = process.env.CALQ_MCP_URL || '${baseUrl}/mcp';
+const CALQ_TOKEN = process.env.CALQ_TOKEN;
+
+if (!CALQ_TOKEN) process.exit(0);
+
+const project = cwd.split('/').pop();
+
+fetch(CALQ_URL, {
+    method: 'POST',
+    headers: {
+        'Content-Type': 'application/json',
+        'Authorization': \`Bearer \${CALQ_TOKEN}\`
+    },
+    body: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'tools/call',
+        params: {
+            name: 'get_context',
+            arguments: {
+                project,
+                limit: 15
+            }
+        },
+        id: Date.now()
+    })
+})
+.then(r => r.json())
+.then(data => {
+    if (data.result?.content?.[0]?.text) {
+        // Output context for Claude to see
+        console.log('<calq-context>');
+        console.log(data.result.content[0].text);
+        console.log('</calq-context>');
+    }
+})
+.catch(() => {});
+`;
+        }
+
+        if (includeCommands) {
+            // Slash commands
+            files['.claude/commands/calq-status.md'] = `---
+description: Show your Calq time tracking status
+---
+
+Use the Calq MCP to show my current timer status and today's time summary. Call the \`timer\` and \`today\` tools.`;
+
+            files['.claude/commands/calq-log.md'] = `---
+description: Log time to a project
+---
+
+Log time to a project using Calq. Ask me which project and how much time, then use the \`commit\` tool to log it.
+
+Example: "Log 2 hours to project-name for implementing feature X"`;
+
+            files['.claude/commands/calq-tasks.md'] = `---
+description: Show your tasks
+---
+
+Show my current tasks from Calq. Use the \`tasks\` tool to list them.`;
+        }
+
+        if (includeSkills) {
+            // Skills
+            files['.claude/skills/calq-remember.md'] = `---
+description: Remember something for later using Calq
+---
+
+When the user wants to remember something:
+1. Use the Calq MCP \`remember\` tool to store the memory
+2. Optionally categorize it (decision, learning, note, todo)
+3. Confirm what was saved`;
+        }
+
+        // Format output
+        let text = `# Calq Configuration Files\n\n`;
+        text += `The following files should be created in your project:\n\n`;
+
+        for (const [path, content] of Object.entries(files)) {
+            text += `## \`${path}\`\n\n`;
+            text += '```' + (path.endsWith('.json') ? 'json' : path.endsWith('.js') ? 'javascript' : 'markdown') + '\n';
+            text += content;
+            text += '\n```\n\n';
+        }
+
+        text += `## Setup Instructions\n\n`;
+        text += `1. Create the files above in your project\n`;
+        text += `2. Set your Calq token: \`export CALQ_TOKEN=your_token_here\`\n`;
+        text += `3. The hooks will automatically capture observations and inject context\n`;
+
+        return { content: [{ type: 'text', text }] };
     }
 );
 

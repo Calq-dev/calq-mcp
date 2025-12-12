@@ -1,5 +1,5 @@
 import { eq, and, or, ilike, sql, desc } from 'drizzle-orm';
-import { db, users, clients, projects, entries, memories, activeTimer, tasks } from './db/index.js';
+import { db, users, clients, projects, entries, memories, activeTimer, tasks, observations, sessionSummaries } from './db/index.js';
 
 // ==================== HELPER FUNCTIONS ====================
 
@@ -1150,4 +1150,195 @@ export async function setUserYouTrackToken(userId, token) {
 export async function getUserYouTrackToken(userId) {
     const [user] = await db.select().from(users).where(eq(users.id, userId.toLowerCase())).limit(1);
     return user?.youtrackToken || null;
+}
+
+// ==================== OBSERVATIONS ====================
+
+export async function createObservation({
+    sessionId,
+    userId,
+    project,
+    type,
+    title,
+    subtitle,
+    narrative,
+    facts,
+    concepts,
+    filesRead,
+    filesModified,
+    toolName,
+    toolInput,
+    discoveryTokens
+}) {
+    const id = generateId();
+
+    await db.insert(observations).values({
+        id,
+        sessionId,
+        userId,
+        project,
+        type,
+        title,
+        subtitle,
+        narrative,
+        facts: facts ? JSON.stringify(facts) : null,
+        concepts: concepts ? JSON.stringify(concepts) : null,
+        filesRead: filesRead ? JSON.stringify(filesRead) : null,
+        filesModified: filesModified ? JSON.stringify(filesModified) : null,
+        toolName,
+        toolInput,
+        discoveryTokens,
+    });
+
+    const [observation] = await db.select().from(observations).where(eq(observations.id, id)).limit(1);
+    return observation;
+}
+
+export async function getObservations({ project, type, userId, limit = 50, offset = 0 } = {}) {
+    let query = db.select().from(observations);
+
+    const conditions = [];
+    if (project) conditions.push(eq(observations.project, project));
+    if (type) conditions.push(eq(observations.type, type));
+    if (userId) conditions.push(eq(observations.userId, userId));
+
+    if (conditions.length > 0) {
+        query = query.where(and(...conditions));
+    }
+
+    const results = await query
+        .orderBy(desc(observations.createdAt))
+        .limit(limit)
+        .offset(offset);
+
+    return results.map(obs => ({
+        ...obs,
+        facts: obs.facts ? JSON.parse(obs.facts) : [],
+        concepts: obs.concepts ? JSON.parse(obs.concepts) : [],
+        filesRead: obs.filesRead ? JSON.parse(obs.filesRead) : [],
+        filesModified: obs.filesModified ? JSON.parse(obs.filesModified) : [],
+    }));
+}
+
+export async function searchObservations(query, { project, type, userId, limit = 20 } = {}) {
+    // Simple text search on title, subtitle, narrative
+    let dbQuery = db.select().from(observations);
+
+    const conditions = [
+        or(
+            ilike(observations.title, `%${query}%`),
+            ilike(observations.subtitle, `%${query}%`),
+            ilike(observations.narrative, `%${query}%`)
+        )
+    ];
+
+    if (project) conditions.push(eq(observations.project, project));
+    if (type) conditions.push(eq(observations.type, type));
+    if (userId) conditions.push(eq(observations.userId, userId));
+
+    const results = await dbQuery
+        .where(and(...conditions))
+        .orderBy(desc(observations.createdAt))
+        .limit(limit);
+
+    return results.map(obs => ({
+        ...obs,
+        facts: obs.facts ? JSON.parse(obs.facts) : [],
+        concepts: obs.concepts ? JSON.parse(obs.concepts) : [],
+        filesRead: obs.filesRead ? JSON.parse(obs.filesRead) : [],
+        filesModified: obs.filesModified ? JSON.parse(obs.filesModified) : [],
+    }));
+}
+
+// ==================== SESSION SUMMARIES ====================
+
+export async function createSessionSummary({
+    sessionId,
+    userId,
+    project,
+    request,
+    investigated,
+    learned,
+    completed,
+    nextSteps,
+    notes,
+    filesRead,
+    filesEdited,
+    discoveryTokens
+}) {
+    const id = generateId();
+
+    // Upsert - update if session already has a summary
+    const existing = await db.select().from(sessionSummaries).where(eq(sessionSummaries.sessionId, sessionId)).limit(1);
+
+    if (existing.length > 0) {
+        await db.update(sessionSummaries)
+            .set({
+                request,
+                investigated,
+                learned,
+                completed,
+                nextSteps,
+                notes,
+                filesRead: filesRead ? JSON.stringify(filesRead) : null,
+                filesEdited: filesEdited ? JSON.stringify(filesEdited) : null,
+                discoveryTokens,
+            })
+            .where(eq(sessionSummaries.sessionId, sessionId));
+
+        const [summary] = await db.select().from(sessionSummaries).where(eq(sessionSummaries.sessionId, sessionId)).limit(1);
+        return summary;
+    }
+
+    await db.insert(sessionSummaries).values({
+        id,
+        sessionId,
+        userId,
+        project,
+        request,
+        investigated,
+        learned,
+        completed,
+        nextSteps,
+        notes,
+        filesRead: filesRead ? JSON.stringify(filesRead) : null,
+        filesEdited: filesEdited ? JSON.stringify(filesEdited) : null,
+        discoveryTokens,
+    });
+
+    const [summary] = await db.select().from(sessionSummaries).where(eq(sessionSummaries.id, id)).limit(1);
+    return summary;
+}
+
+export async function getSessionSummaries({ project, userId, limit = 10 } = {}) {
+    let query = db.select().from(sessionSummaries);
+
+    const conditions = [];
+    if (project) conditions.push(eq(sessionSummaries.project, project));
+    if (userId) conditions.push(eq(sessionSummaries.userId, userId));
+
+    if (conditions.length > 0) {
+        query = query.where(and(...conditions));
+    }
+
+    const results = await query
+        .orderBy(desc(sessionSummaries.createdAt))
+        .limit(limit);
+
+    return results.map(s => ({
+        ...s,
+        filesRead: s.filesRead ? JSON.parse(s.filesRead) : [],
+        filesEdited: s.filesEdited ? JSON.parse(s.filesEdited) : [],
+    }));
+}
+
+export async function getSessionSummary(sessionId) {
+    const [summary] = await db.select().from(sessionSummaries).where(eq(sessionSummaries.sessionId, sessionId)).limit(1);
+    if (!summary) return null;
+
+    return {
+        ...summary,
+        filesRead: summary.filesRead ? JSON.parse(summary.filesRead) : [],
+        filesEdited: summary.filesEdited ? JSON.parse(summary.filesEdited) : [],
+    };
 }
