@@ -1432,3 +1432,30 @@ export async function deleteComponent(type, name) {
 
     return component;
 }
+
+// Get entity counts for whoami
+export async function getEntityCounts(userId = null) {
+    const [projectsResult] = await db.select({ count: sql`count(*)` }).from(projects);
+    const [clientsResult] = await db.select({ count: sql`count(*)` }).from(clients);
+    const [memoriesResult] = await db.select({ count: sql`count(*)` }).from(memories);
+
+    // Tasks and entries can be filtered by user
+    let entriesQuery = db.select({ count: sql`count(*)` }).from(entries);
+    let tasksQuery = db.select({ count: sql`count(*)` }).from(tasks);
+
+    if (userId) {
+        entriesQuery = entriesQuery.where(eq(entries.userId, userId));
+        tasksQuery = tasksQuery.where(eq(tasks.userId, userId));
+    }
+
+    const [entriesResult] = await entriesQuery;
+    const [tasksResult] = await tasksQuery;
+
+    return {
+        projects: Number(projectsResult.count),
+        clients: Number(clientsResult.count),
+        entries: Number(entriesResult.count),
+        memories: Number(memoriesResult.count),
+        tasks: Number(tasksResult.count)
+    };
+}

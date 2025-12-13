@@ -5,3 +5,4 @@
 !package.json
 !package-lock.json
 !src/
+!drizzle.config.js

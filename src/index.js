@@ -35,6 +35,7 @@ import {
     updateProject,
     getUnbilledByClient,
     getUser,
+    getEntityCounts,
     // Task functions
     createTask,
     getTasks,
@@ -97,16 +98,16 @@ const server = new McpServer({
     description: 'Time tracking, project management, and memory for teams'
 });
 
-// Tool: Commit time and/or a summary to a project
+// Tool: Log time to a project
 server.tool(
-    'commit',
+    'log_time',
     {
         project: z.string().describe('Name of the project'),
-        message: z.string().describe('What was accomplished (like a git commit message)'),
+        message: z.string().describe('What was accomplished'),
         minutes: z.number().nonnegative().optional().describe('Time spent in minutes (defaults to 0)'),
         billable: z.boolean().optional().describe('Whether this is billable work (defaults to true)'),
-        date: z.string().optional().describe('Date for the entry (YYYY-MM-DD format). Defaults to today. Use for backdating or future entries.'),
-        task: z.string().optional().describe('Task ID to link this time entry to (syncs to YouTrack if task is linked)')
+        date: z.string().optional().describe('Date for the entry (YYYY-MM-DD format). Defaults to today.'),
+        task: z.string().optional().describe('Task ID to link this time entry to (syncs to YouTrack if linked)')
     },
     async ({ project, message, minutes, billable, date, task }) => {
         const auth = checkUser();
@@ -152,876 +153,565 @@ server.tool(
     }
 );
 
-// Tool: Delete an entry
+// Tool: Manage time entries (edit/delete)
 server.tool(
-    'delete',
+    'entry_manage',
     {
-        entry_id: z.string().optional().describe('ID of the entry to delete (deletes last entry if not provided)')
+        action: z.enum(['edit', 'delete']).describe('Action to perform'),
+        entry_id: z.string().optional().describe('ID of the entry (defaults to last entry for delete)'),
+        message: z.string().optional().describe('New message (for edit)'),
+        minutes: z.number().nonnegative().optional().describe('New time in minutes (for edit)'),
+        billable: z.boolean().optional().describe('Set billable status (for edit)'),
+        billed: z.boolean().optional().describe('Mark as billed/unbilled (for edit)')
     },
-    async ({ entry_id }) => {
-        const deleted = await deleteEntry(entry_id || null);
-
-        if (!deleted) {
-            return {
-                content: [{ type: 'text', text: '❌ No entry found to delete.' }]
-            };
+    async ({ action, entry_id, message, minutes, billable, billed }) => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
 
-        return {
-            content: [{
-                type: 'text',
-                text: `🗑️ Deleted entry from **${deleted.project}**\n\n${deleted.description || '(no message)'}\n⏱️ ${formatDuration(deleted.minutes)}`
-            }]
-        };
-    }
-);
-
-// Tool: Edit an entry
-server.tool(
-    'edit',
-    {
-        entry_id: z.string().describe('ID of the entry to edit (use get_project_summary to see IDs)'),
-        project: z.string().optional().describe('New project name (to move entry)'),
-        message: z.string().optional().describe('New message'),
-        minutes: z.number().nonnegative().optional().describe('New time in minutes'),
-        billable: z.boolean().optional().describe('Set billable status'),
-        billed: z.boolean().optional().describe('Mark as billed (true) or unbilled (false)')
-    },
-    async ({ entry_id, project, message, minutes, billable, billed }) => {
-        if (!project && !message && minutes === undefined && billable === undefined && billed === undefined) {
-            return {
-                content: [{ type: 'text', text: '❌ Provide at least one field to update.' }]
-            };
-        }
-
-        const updates = {};
-        if (project) updates.project = project;
-        if (message) updates.message = message;
-        if (minutes !== undefined) updates.minutes = minutes;
-        if (billable !== undefined) updates.billable = billable;
-        if (billed !== undefined) updates.billed = billed;
-
-        const updated = await editEntry(entry_id, updates);
-
-        if (!updated) {
-            return {
-                content: [{ type: 'text', text: `❌ Entry "${entry_id}" not found.` }]
-            };
-        }
-
-        let status = [];
-        if (updated.billable) status.push('billable');
-        if (updated.billed) status.push('billed');
-        const statusText = status.length ? ` (${status.join(', ')})` : '';
-
-        return {
-            content: [{
-                type: 'text',
-                text: `✏️ Updated entry in **${updated.project}**${statusText}\n\n${updated.description}\n⏱️ ${formatDuration(updated.minutes)}`
-            }]
-        };
-    }
-);
-
-// Tool: List all projects
-server.tool(
-    'list_projects',
-    {},
-    async () => {
-        const projects = await getProjects();
-
-        if (projects.length === 0) {
+        if (action === 'delete') {
+            const deleted = await deleteEntry(entry_id || null);
+            if (!deleted) {
+                return { content: [{ type: 'text', text: '❌ No entry found to delete.' }] };
+            }
             return {
                 content: [{
                     type: 'text',
-                    text: '📋 No projects yet. Start tracking time with the log_time tool!'
+                    text: `🗑️ Deleted entry from **${deleted.project}**\n\n${deleted.description || '(no message)'}\n⏱️ ${formatDuration(deleted.minutes)}`
                 }]
             };
         }
 
-        const projectList = projects
-            .sort((a, b) => b.totalMinutes - a.totalMinutes)
-            .map(p => `• **${p.name}**: ${p.totalFormatted}`)
-            .join('\n');
+        if (action === 'edit') {
+            if (!entry_id) {
+                return { content: [{ type: 'text', text: '❌ entry_id is required for edit action.' }] };
+            }
+            if (!message && minutes === undefined && billable === undefined && billed === undefined) {
+                return { content: [{ type: 'text', text: '❌ Provide at least one field to update.' }] };
+            }
 
-        return {
-            content: [{
-                type: 'text',
-                text: `📋 **Projects** (${projects.length})\n\n${projectList}`
-            }]
-        };
-    }
-);
+            const updates = {};
+            if (message) updates.description = message;
+            if (minutes !== undefined) updates.minutes = minutes;
+            if (billable !== undefined) updates.billable = billable;
+            if (billed !== undefined) updates.billed = billed;
 
-// Tool: Get project summary with recent entries
-server.tool(
-    'get_project_summary',
-    {
-        project: z.string().describe('Name of the project to get summary for'),
-        limit: z.number().positive().optional().describe('Number of recent entries to show (default: 10)')
-    },
-    async ({ project, limit }) => {
-        const entries = await getProjectEntries(project, limit || 10);
-        const projects = await getProjects();
-        const projectData = projects.find(p =>
-            p.id === project.toLowerCase().trim() ||
-            p.name.toLowerCase() === project.toLowerCase()
-        );
+            const updated = await editEntry(entry_id, updates);
+            if (!updated) {
+                return { content: [{ type: 'text', text: `❌ Entry "${entry_id}" not found.` }] };
+            }
 
-        if (!projectData) {
+            let status = [];
+            if (updated.billable) status.push('billable');
+            if (updated.billed) status.push('billed');
+            const statusText = status.length ? ` (${status.join(', ')})` : '';
+
             return {
                 content: [{
                     type: 'text',
-                    text: `❌ Project "${project}" not found. Use list_projects to see available projects.`
+                    text: `✏️ Updated entry in **${updated.project}**${statusText}\n\n${updated.description}\n⏱️ ${formatDuration(updated.minutes)}`
                 }]
             };
         }
 
-        let text = `📊 **${projectData.name}**\n`;
-        text += `⏱️ Total time: ${projectData.totalFormatted}\n\n`;
+        return { content: [{ type: 'text', text: `❌ Unknown action: ${action}` }] };
+    }
+);
 
-        if (entries.length === 0) {
-            text += '_No entries yet._';
-        } else {
-            text += `**Recent entries:**\n`;
-            for (const entry of entries) {
-                const date = new Date(entry.createdAt).toLocaleDateString();
-                const icon = entry.type === 'commit' ? '📌' : '⏰';
-                text += `${icon} \`${entry.id}\` ${date} - ${entry.durationFormatted}`;
-                if (entry.description) {
-                    text += `: ${entry.description}`;
+// Tool: Query time summaries
+server.tool(
+    'time_query',
+    {
+        scope: z.enum(['today', 'week', 'unbilled', 'invoice', 'team', 'project']).describe('What to query'),
+        project: z.string().optional().describe('Project name (required for scope=project)'),
+        limit: z.number().positive().optional().describe('Number of entries to show (for project scope, default: 10)')
+    },
+    async ({ scope, project, limit }) => {
+        const auth = checkUser();
+        if (auth.error) {
+            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
+        }
+
+        // TODAY
+        if (scope === 'today') {
+            const summary = await getTodaySummary(auth.user.id);
+            if (summary.projects.length === 0) {
+                return { content: [{ type: 'text', text: `📅 **Today (${summary.date})**\n\n_No time logged today yet._` }] };
+            }
+            let text = `📅 **Today (${summary.date})**\n⏱️ Total: ${summary.totalFormatted}\n\n`;
+            for (const proj of summary.projects) {
+                text += `**${proj.name}**: ${proj.durationFormatted}\n`;
+                for (const entry of proj.entries) {
+                    text += `  • ${entry.description || '(no description)'}\n`;
                 }
                 text += '\n';
             }
+            return { content: [{ type: 'text', text }] };
         }
 
-
-        return {
-            content: [{ type: 'text', text }]
-        };
-    }
-);
-
-// Tool: Get today's summary
-server.tool(
-    'get_today_summary',
-    {},
-    async () => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
-        }
-
-        const summary = await getTodaySummary(auth.user.id);
-
-        if (summary.projects.length === 0) {
-            return {
-                content: [{
-                    type: 'text',
-                    text: `📅 **Today (${summary.date})**\n\n_No time logged today yet._`
-                }]
-            };
-        }
-
-        let text = `📅 **Today (${summary.date})**\n`;
-        text += `⏱️ Total: ${summary.totalFormatted}\n\n`;
-
-        for (const project of summary.projects) {
-            text += `**${project.name}**: ${project.durationFormatted}\n`;
-            for (const entry of project.entries) {
-                const icon = entry.type === 'commit' ? '  📌' : '  •';
-                text += `${icon} ${entry.description || '(no description)'}\n`;
+        // WEEK
+        if (scope === 'week') {
+            const summary = await getWeeklySummary(auth.user.id);
+            if (summary.days.length === 0) {
+                return { content: [{ type: 'text', text: `📆 **This Week**\n\n_No time logged this week yet._` }] };
             }
-            text += '\n';
+            let text = `📆 **This Week** (starting ${summary.weekStart})\n⏱️ Total: ${summary.totalFormatted}\n\n`;
+            for (const day of summary.days.sort((a, b) => a.date.localeCompare(b.date))) {
+                const dayName = new Date(day.date).toLocaleDateString('en-US', { weekday: 'short' });
+                text += `**${dayName} (${day.date})**: ${day.durationFormatted}\n`;
+            }
+            return { content: [{ type: 'text', text }] };
         }
 
-        return {
-            content: [{ type: 'text', text }]
-        };
+        // UNBILLED
+        if (scope === 'unbilled') {
+            const summary = await getUnbilledSummary(auth.user.id);
+            if (summary.projects.length === 0) {
+                return { content: [{ type: 'text', text: `💰 **Unbilled Time**\n\n_No unbilled billable time._` }] };
+            }
+            let text = `💰 **Unbilled Time**\n⏱️ Total: ${summary.totalFormatted}\n\n`;
+            for (const proj of summary.projects.sort((a, b) => b.minutes - a.minutes)) {
+                text += `**${proj.name}**: ${proj.durationFormatted} (${proj.entries.length} entries)\n`;
+            }
+            return { content: [{ type: 'text', text }] };
+        }
+
+        // INVOICE (unbilled by client)
+        if (scope === 'invoice') {
+            const summary = await getUnbilledByClient(auth.user.id);
+            if (summary.clients.length === 0) {
+                return { content: [{ type: 'text', text: `🧾 **Invoice Summary**\n\n_No unbilled time._` }] };
+            }
+            let text = `🧾 **Invoice Summary**\n⏱️ Total: ${summary.totalFormatted} (€${summary.totalValue})\n\n`;
+            for (const client of summary.clients) {
+                text += `**${client.clientName}**: ${client.durationFormatted} (€${client.valueFormatted})\n`;
+                for (const proj of client.projects) {
+                    text += `  • ${proj.projectName}: ${proj.durationFormatted}\n`;
+                }
+                text += '\n';
+            }
+            return { content: [{ type: 'text', text }] };
+        }
+
+        // TEAM
+        if (scope === 'team') {
+            const summary = await getTeamTodaySummary();
+            if (summary.members.length === 0) {
+                return { content: [{ type: 'text', text: `👥 **Team Today (${summary.date})**\n\n_No team activity today._` }] };
+            }
+            let text = `👥 **Team Today (${summary.date})**\n⏱️ Total: ${summary.teamTotalFormatted}\n\n`;
+            for (const member of summary.members) {
+                text += `**${member.username}**: ${member.totalFormatted}\n`;
+                for (const proj of member.projects) {
+                    text += `  • ${proj.name}: ${proj.durationFormatted}\n`;
+                }
+                text += '\n';
+            }
+            return { content: [{ type: 'text', text }] };
+        }
+
+        // PROJECT
+        if (scope === 'project') {
+            if (!project) {
+                return { content: [{ type: 'text', text: '❌ project parameter is required for scope=project' }] };
+            }
+            const entries = await getProjectEntries(project, limit || 10);
+            const projects = await getProjects();
+            const projectData = projects.find(p =>
+                p.id === project.toLowerCase().trim() ||
+                p.name.toLowerCase() === project.toLowerCase()
+            );
+            if (!projectData) {
+                return { content: [{ type: 'text', text: `❌ Project "${project}" not found.` }] };
+            }
+            let text = `📊 **${projectData.name}**\n⏱️ Total time: ${projectData.totalFormatted}\n\n`;
+            if (entries.length === 0) {
+                text += '_No entries yet._';
+            } else {
+                text += `**Recent entries:**\n`;
+                for (const entry of entries) {
+                    const date = new Date(entry.createdAt).toLocaleDateString();
+                    text += `• \`${entry.id}\` ${date} - ${entry.durationFormatted}: ${entry.description || '(no description)'}\n`;
+                }
+            }
+            return { content: [{ type: 'text', text }] };
+        }
+
+        return { content: [{ type: 'text', text: `❌ Unknown scope: ${scope}` }] };
     }
 );
 
-// Tool: Get weekly summary
+// Tool: Stopwatch for time tracking
 server.tool(
-    'get_weekly_summary',
-    {},
-    async () => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
-        }
-
-        const summary = await getWeeklySummary(auth.user.id);
-
-        if (summary.days.length === 0) {
-            return {
-                content: [{
-                    type: 'text',
-                    text: `📆 **This Week**\n\n_No time logged this week yet._`
-                }]
-            };
-        }
-
-        let text = `📆 **This Week** (starting ${summary.weekStart})\n`;
-        text += `⏱️ Total: ${summary.totalFormatted}\n\n`;
-
-        for (const day of summary.days.sort((a, b) => a.date.localeCompare(b.date))) {
-            const dayName = new Date(day.date).toLocaleDateString('en-US', { weekday: 'short' });
-            text += `**${dayName} (${day.date})**: ${day.durationFormatted}\n`;
-        }
-
-        return {
-            content: [{ type: 'text', text }]
-        };
-    }
-);
-
-// Tool: Get unbilled time summary
-server.tool(
-    'get_unbilled',
-    {},
-    async () => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
-        }
-
-        const summary = await getUnbilledSummary(auth.user.id);
-
-        if (summary.projects.length === 0) {
-            return {
-                content: [{
-                    type: 'text',
-                    text: `💰 **Unbilled Time**\n\n_No unbilled billable time._`
-                }]
-            };
-        }
-
-        let text = `💰 **Unbilled Time**\n`;
-        text += `⏱️ Total: ${summary.totalFormatted}\n\n`;
-
-        for (const project of summary.projects.sort((a, b) => b.minutes - a.minutes)) {
-            text += `**${project.name}**: ${project.durationFormatted} (${project.entries.length} entries)\n`;
-        }
-
-        return {
-            content: [{ type: 'text', text }]
-        };
-    }
-);
-
-// Tool: Start a timer
-server.tool(
-    'start',
+    'stopwatch',
     {
-        project: z.string().describe('Name of the project to start timing'),
-        description: z.string().optional().describe('What you are working on'),
-        task: z.string().optional().describe('Task ID to link this timer to')
+        action: z.enum(['start', 'stop', 'status', 'pause', 'resume', 'cancel']).describe('Action to perform'),
+        project: z.string().optional().describe('Project name (required for start)'),
+        description: z.string().optional().describe('What you are working on (for start)'),
+        message: z.string().optional().describe('Final summary message (for stop)'),
+        billable: z.boolean().optional().describe('Whether this is billable (for stop, defaults to true)'),
+        task: z.string().optional().describe('Task ID to link to (for start)')
     },
-    async ({ project, description, task }) => {
+    async ({ action, project, description, message, billable, task }) => {
         const auth = checkUser();
         if (auth.error) {
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
 
-        // If task is specified, include it in description for reference
-        let taskInfo = '';
-        if (task) {
-            const taskData = await getTask(task);
-            if (taskData) {
-                taskInfo = taskData.youtrackId ? ` [${taskData.youtrackId}]` : ` [task:${task}]`;
+        // START
+        if (action === 'start') {
+            if (!project) {
+                return { content: [{ type: 'text', text: '❌ project is required for start action' }] };
             }
-        }
-
-        const result = await startTimer(project, (description || '') + taskInfo, auth.user.id);
-
-        if (result.error) {
-            const elapsed = formatDuration(Math.round((new Date() - new Date(result.timer.startedAt)) / 60000));
-            return {
-                content: [{
-                    type: 'text',
-                    text: `⚠️ Timer already running on **${result.timer.project}** (${elapsed})\n\n${result.timer.description || ''}\n\nStop it first with the stop tool.`
-                }]
-            };
-        }
-
-        let text = `⏱️ Timer started for **${project}**`;
-        if (description) text += `\n\n${description}`;
-        if (task) text += `\n📋 Linked to task${taskInfo}`;
-        text += `\n\nUse the stop tool when you're done.`;
-
-        return {
-            content: [{ type: 'text', text }]
-        };
-    }
-);
-
-// Tool: Stop the timer
-server.tool(
-    'stop',
-    {
-        message: z.string().optional().describe('Final summary message (uses original description if not provided)'),
-        billable: z.boolean().optional().describe('Whether this is billable (defaults to true)')
-    },
-    async ({ message, billable }) => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
-        }
-
-        const result = await stopTimer(message || null, billable !== false, auth.user.id);
-
-        if (result.error) {
-            return {
-                content: [{ type: 'text', text: '❌ No timer running. Start one with the start tool.' }]
-            };
-        }
-
-        let text = `⏹️ Timer stopped - **${result.entry.project}**\n\n${result.entry.description}`;
-        text += `\n\n⏱️ ${formatDuration(result.minutes)}`;
-        if (result.entry.billable === false) {
-            text += `\n🏷️ Non-billable`;
-        }
-
-        return {
-            content: [{ type: 'text', text }]
-        };
-    }
-);
-
-// Tool: Check timer status
-server.tool(
-    'timer_status',
-    {},
-    async () => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
-        }
-
-        const timer = await getActiveTimer(auth.user.id);
-
-        if (!timer) {
-            return {
-                content: [{ type: 'text', text: '⏱️ No timer running.' }]
-            };
-        }
-
-        let statusIcon = timer.isPaused ? '⏸️' : '⏱️';
-        let statusText = timer.isPaused ? 'Timer paused' : 'Timer running';
-        let text = `${statusIcon} ${statusText}: **${timer.project}** (${timer.elapsedFormatted})`;
-
-        if (timer.description) {
-            text += `\n\n${timer.description}`;
-        }
-
-        if (timer.totalPausedMinutes > 0) {
-            text += `\n\n⏸️ Paused time: ${formatDuration(timer.totalPausedMinutes)}`;
-        }
-
-        if (timer.isPaused) {
-            text += '\n\nUse resume to continue tracking.';
-        }
-
-        return {
-            content: [{ type: 'text', text }]
-        };
-    }
-);
-
-// Tool: Cancel timer without saving
-server.tool(
-    'cancel_timer',
-    {},
-    async () => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
-        }
-
-        const timer = await cancelTimer(auth.user.id);
-
-        if (!timer) {
-            return {
-                content: [{ type: 'text', text: '❌ No timer to cancel.' }]
-            };
-        }
-
-        return {
-            content: [{
-                type: 'text',
-                text: `🚫 Timer cancelled (not saved)\n\nWas tracking: **${timer.project}**`
-            }]
-        };
-    }
-);
-
-// Tool: Pause the timer
-server.tool(
-    'pause',
-    {},
-    async () => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
-        }
-
-        const result = await pauseTimer(auth.user.id);
-
-        if (result.error) {
-            if (result.error === 'Timer already paused') {
-                return {
-                    content: [{ type: 'text', text: '⏸️ Timer is already paused. Use resume to continue.' }]
-                };
+            let taskInfo = '';
+            if (task) {
+                const taskData = await getTask(task);
+                if (taskData) {
+                    taskInfo = taskData.youtrackId ? ` [${taskData.youtrackId}]` : ` [task:${task}]`;
+                }
             }
-            return {
-                content: [{ type: 'text', text: '❌ No timer running to pause.' }]
-            };
-        }
-
-        return {
-            content: [{
-                type: 'text',
-                text: `⏸️ Timer paused - **${result.project}**\n\n⏱️ ${result.runningFormatted} tracked so far\n\nUse resume to continue.`
-            }]
-        };
-    }
-);
-
-// Tool: Resume a paused timer
-server.tool(
-    'resume',
-    {},
-    async () => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
-        }
-
-        const result = await resumeTimer(auth.user.id);
-
-        if (result.error) {
-            if (result.error === 'Timer is not paused') {
-                return {
-                    content: [{ type: 'text', text: '▶️ Timer is already running. Use pause to pause it.' }]
-                };
+            const result = await startTimer(project, (description || '') + taskInfo, auth.user.id);
+            if (result.error) {
+                const elapsed = formatDuration(Math.round((new Date() - new Date(result.timer.startedAt)) / 60000));
+                return { content: [{ type: 'text', text: `⚠️ Timer already running on **${result.timer.projectId}** (${elapsed})\n\nStop it first.` }] };
             }
-            return {
-                content: [{ type: 'text', text: '❌ No timer to resume.' }]
-            };
+            let text = `⏱️ Timer started for **${project}**`;
+            if (description) text += `\n\n${description}`;
+            if (task) text += `\n📋 Linked to task${taskInfo}`;
+            return { content: [{ type: 'text', text }] };
         }
 
-        let text = `▶️ Timer resumed - **${result.project}**`;
-        if (result.pausedMinutes > 0) {
-            text += `\n\nPaused for ${formatDuration(result.pausedMinutes)}`;
+        // STOP
+        if (action === 'stop') {
+            const result = await stopTimer(message || null, billable !== false, auth.user.id);
+            if (result.error) {
+                return { content: [{ type: 'text', text: '❌ No timer running.' }] };
+            }
+            let text = `⏹️ Timer stopped - **${result.entry.project}**\n\n${result.entry.description}`;
+            text += `\n\n⏱️ ${formatDuration(result.minutes)}`;
+            if (result.entry.billable === false) text += `\n🏷️ Non-billable`;
+            return { content: [{ type: 'text', text }] };
         }
 
-        return {
-            content: [{ type: 'text', text }]
-        };
+        // STATUS
+        if (action === 'status') {
+            const timer = await getActiveTimer(auth.user.id);
+            if (!timer) {
+                return { content: [{ type: 'text', text: '⏱️ No timer running.' }] };
+            }
+            let statusIcon = timer.isPaused ? '⏸️' : '⏱️';
+            let statusText = timer.isPaused ? 'Paused' : 'Running';
+            let text = `${statusIcon} ${statusText}: **${timer.project}** (${timer.elapsedFormatted})`;
+            if (timer.description) text += `\n\n${timer.description}`;
+            if (timer.totalPausedMinutes > 0) text += `\n\n⏸️ Paused time: ${formatDuration(timer.totalPausedMinutes)}`;
+            return { content: [{ type: 'text', text }] };
+        }
+
+        // PAUSE
+        if (action === 'pause') {
+            const result = await pauseTimer(auth.user.id);
+            if (result.error) {
+                if (result.error === 'Timer already paused') {
+                    return { content: [{ type: 'text', text: '⏸️ Timer is already paused.' }] };
+                }
+                return { content: [{ type: 'text', text: '❌ No timer running to pause.' }] };
+            }
+            return { content: [{ type: 'text', text: `⏸️ Timer paused - **${result.project}**\n\n⏱️ ${result.runningFormatted} tracked so far` }] };
+        }
+
+        // RESUME
+        if (action === 'resume') {
+            const result = await resumeTimer(auth.user.id);
+            if (result.error) {
+                if (result.error === 'Timer is not paused') {
+                    return { content: [{ type: 'text', text: '▶️ Timer is already running.' }] };
+                }
+                return { content: [{ type: 'text', text: '❌ No timer to resume.' }] };
+            }
+            let text = `▶️ Timer resumed - **${result.project}**`;
+            if (result.pausedMinutes > 0) text += `\n\nPaused for ${formatDuration(result.pausedMinutes)}`;
+            return { content: [{ type: 'text', text }] };
+        }
+
+        // CANCEL
+        if (action === 'cancel') {
+            const result = await cancelTimer(auth.user.id);
+            if (result.error) {
+                return { content: [{ type: 'text', text: '❌ No timer to cancel.' }] };
+            }
+            return { content: [{ type: 'text', text: `🚫 Timer cancelled (not saved)\n\nWas tracking: **${result.project}**` }] };
+        }
+
+        return { content: [{ type: 'text', text: `❌ Unknown action: ${action}` }] };
     }
 );
 
 // ==================== MEMORY TOOLS ====================
 
-// Tool: Remember something
+// Tool: Manage memories (create/delete)
 server.tool(
-    'remember',
+    'memory_manage',
     {
-        content: z.string().describe('What to remember'),
-        category: z.string().optional().describe('Category (e.g. "idea", "note", "decision")'),
-        personal: z.boolean().optional().describe('Make this memory private (not shared with team)'),
-        project: z.string().optional().describe('Link to a project'),
-        client: z.string().optional().describe('Link to a client')
+        action: z.enum(['create', 'delete']).describe('Action to perform'),
+        content: z.string().optional().describe('What to remember (for create)'),
+        category: z.string().optional().describe('Category: idea, note, decision, etc. (for create)'),
+        personal: z.boolean().optional().describe('Make private/not shared (for create)'),
+        project: z.string().optional().describe('Link to a project (for create)'),
+        client: z.string().optional().describe('Link to a client (for create)'),
+        memory_id: z.string().optional().describe('ID of memory to delete (for delete)')
     },
-    async ({ content, category, personal, project, client }) => {
+    async ({ action, content, category, personal, project, client, memory_id }) => {
         const auth = checkUser();
         if (auth.error) {
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
 
-        try {
-            const memory = await storeMemory(content, {
-                category: category || '',
-                shared: !personal,
-                project: project || null,
-                client: client || null,
-                userId: auth.user.id
-            });
-
-            let text = `🧠 Remembered${personal ? ' (personal)' : ''}${category ? ` [${category}]` : ''}`;
-            if (project) text += `\n📁 Project: ${project}`;
-            if (client) text += `\n👤 Client: ${client}`;
-            text += `\n\n${content}`;
-
-            return {
-                content: [{ type: 'text', text }]
-            };
-        } catch (error) {
-            return {
-                content: [{ type: 'text', text: `❌ ${error.message}` }]
-            };
-        }
-    }
-);
-
-// Tool: Capture an idea (shortcut for remember with category=idea)
-server.tool(
-    'idea',
-    {
-        content: z.string().describe('The idea to capture'),
-        project: z.string().optional().describe('Link to a project'),
-        client: z.string().optional().describe('Link to a client')
-    },
-    async ({ content, project, client }) => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
-        }
-
-        try {
-            const memory = await storeMemory(content, {
-                category: 'idea',
-                shared: true,
-                project: project || null,
-                client: client || null,
-                userId: auth.user.id
-            });
-
-            let text = '💡 **Idea captured!**';
-            if (project) text += `\n📁 Project: ${project}`;
-            if (client) text += `\n👤 Client: ${client}`;
-            text += `\n\n${content}`;
-
-            return {
-                content: [{ type: 'text', text }]
-            };
-        } catch (error) {
-            return {
-                content: [{ type: 'text', text: `❌ ${error.message}` }]
-            };
-        }
-    }
-);
-
-// Tool: List all ideas
-server.tool(
-    'list_ideas',
-    {
-        project: z.string().optional().describe('Filter by project'),
-        client: z.string().optional().describe('Filter by client')
-    },
-    async ({ project, client }) => {
-        const memories = await getAllMemories({
-            category: 'idea',
-            project: project || null,
-            client: client || null
-        });
-
-        if (memories.length === 0) {
-            return {
-                content: [{ type: 'text', text: '💡 No ideas yet. Capture one with "idea: your brilliant thought"' }]
-            };
-        }
-
-        let text = '💡 **Ideas** (' + memories.length + ')\n\n';
-        for (const idea of memories.slice(-20).reverse()) {
-            const date = new Date(idea.createdAt).toLocaleDateString();
-            let meta = [];
-            if (idea.projectId) meta.push('📁 ' + idea.projectId);
-            if (idea.clientId) meta.push('👤 ' + idea.clientId);
-            text += '• `' + idea.id + '` ' + idea.content.substring(0, 80) + (idea.content.length > 80 ? '...' : '') + (meta.length ? ' [' + meta.join(', ') + ']' : '') + ' - ' + date + '\n';
-        }
-
-        return {
-            content: [{ type: 'text', text }]
-        };
-    }
-);
-
-// Tool: Recall memories
-server.tool(
-    'recall',
-    {
-        query: z.string().describe('What to search for in your memories'),
-        project: z.string().optional().describe('Filter by project'),
-        client: z.string().optional().describe('Filter by client')
-    },
-    async ({ query, project, client }) => {
-        try {
-            const memories = await searchMemories(query, {
-                limit: 5,
-                project: project || null,
-                client: client || null
-            });
-
-            if (memories.length === 0) {
-                return {
-                    content: [{ type: 'text', text: `🧠 No memories found for: "${query}"` }]
-                };
+        if (action === 'create') {
+            if (!content) {
+                return { content: [{ type: 'text', text: '❌ content is required for create action' }] };
             }
-
-            let text = `🧠 **Memories matching: "${query}"**\n\n`;
-            for (const memory of memories) {
-                const date = new Date(memory.createdAt).toLocaleDateString();
-                const score = memory.relevanceScore ? ` (${(memory.relevanceScore * 100).toFixed(0)}%)` : '';
-                let meta = [];
-                if (memory.category) meta.push(memory.category);
-                if (memory.projectId) meta.push(`📁 ${memory.projectId}`);
-                if (!memory.shared) meta.push('🔒 personal');
-                text += `• ${memory.content}${meta.length ? ` [${meta.join(', ')}]` : ''} - ${date}${score}\n\n`;
+            try {
+                await storeMemory(content, {
+                    category: category || '',
+                    shared: !personal,
+                    project: project || null,
+                    client: client || null,
+                    userId: auth.user.id
+                });
+                let text = `🧠 Remembered${personal ? ' (personal)' : ''}${category ? ` [${category}]` : ''}`;
+                if (project) text += `\n📁 Project: ${project}`;
+                if (client) text += `\n👤 Client: ${client}`;
+                text += `\n\n${content}`;
+                return { content: [{ type: 'text', text }] };
+            } catch (error) {
+                return { content: [{ type: 'text', text: `❌ ${error.message}` }] };
             }
-
-            return {
-                content: [{ type: 'text', text }]
-            };
-        } catch (error) {
-            return {
-                content: [{ type: 'text', text: `❌ ${error.message}` }]
-            };
         }
+
+        if (action === 'delete') {
+            if (!memory_id) {
+                return { content: [{ type: 'text', text: '❌ memory_id is required for delete action' }] };
+            }
+            const deleted = await deleteMemory(memory_id);
+            if (!deleted) {
+                return { content: [{ type: 'text', text: `❌ Memory "${memory_id}" not found.` }] };
+            }
+            return { content: [{ type: 'text', text: `🗑️ Forgot: ${deleted.content.substring(0, 100)}${deleted.content.length > 100 ? '...' : ''}` }] };
+        }
+
+        return { content: [{ type: 'text', text: `❌ Unknown action: ${action}` }] };
     }
 );
 
-// Tool: Search time entries semantically
+// Tool: Query memories and time entries
 server.tool(
-    'search_entries',
+    'memory_query',
     {
-        query: z.string().describe('What to search for in your time entries')
-    },
-    async ({ query }) => {
-        try {
-            const entries = await searchEntries(query, 10);
-
-            if (entries.length === 0) {
-                return {
-                    content: [{ type: 'text', text: `🔍 No entries found for: "${query}"` }]
-                };
-            }
-
-            let text = `🔍 **Entries matching: "${query}"**\n\n`;
-            for (const entry of entries) {
-                const date = new Date(entry.createdAt).toLocaleDateString();
-                const score = entry.relevanceScore ? ` (${(entry.relevanceScore * 100).toFixed(0)}%)` : '';
-                text += `• **${entry.projectName}** - ${date} - ${entry.durationFormatted}${score}\n  ${entry.description}\n\n`;
-            }
-
-            return {
-                content: [{ type: 'text', text }]
-            };
-        } catch (error) {
-            return {
-                content: [{ type: 'text', text: `❌ ${error.message}` }]
-            };
-        }
-    }
-);
-
-// Tool: List all memories
-// Tool: List memories
-server.tool(
-    'list_memories',
-    {
-        category: z.string().optional().describe('Filter by category'),
+        type: z.enum(['memories', 'ideas', 'entries']).describe('What to query'),
+        query: z.string().optional().describe('Search query (semantic search)'),
+        category: z.string().optional().describe('Filter by category (for memories)'),
         project: z.string().optional().describe('Filter by project'),
         client: z.string().optional().describe('Filter by client'),
         personal: z.boolean().optional().describe('Show only personal memories')
     },
-    async ({ category, project, client, personal }) => {
-        const memories = await getAllMemories({
-            category: category || null,
-            project: project || null,
-            client: client || null,
-            personal: personal || false
-        });
-
-        if (memories.length === 0) {
-            return {
-                content: [{ type: 'text', text: `🧠 No memories found.` }]
-            };
-        }
-
-        let text = `🧠 **Memories** (${memories.length})\n\n`;
-        for (const memory of memories.slice(-20).reverse()) {
-            const date = new Date(memory.createdAt).toLocaleDateString();
-            let meta = [];
-            if (memory.category) meta.push(memory.category);
-            if (memory.projectId) meta.push(`📁 ${memory.projectId}`);
-            if (memory.clientId) meta.push(`👤 ${memory.clientId}`);
-            if (!memory.shared) meta.push('🔒');
-            text += `• \`${memory.id}\` ${memory.content.substring(0, 80)}${memory.content.length > 80 ? '...' : ''}${meta.length ? ` [${meta.join(', ')}]` : ''} - ${date}\n`;
-        }
-
-        return {
-            content: [{ type: 'text', text }]
-        };
-    }
-);
-
-// Tool: Delete a memory
-server.tool(
-    'forget',
-    {
-        memory_id: z.string().describe('ID of the memory to delete (use list_memories to see IDs)')
-    },
-    async ({ memory_id }) => {
-        const deleted = await deleteMemory(memory_id);
-
-        if (!deleted) {
-            return {
-                content: [{ type: 'text', text: `❌ Memory "${memory_id}" not found.` }]
-            };
-        }
-
-        return {
-            content: [{
-                type: 'text',
-                text: `🗑️ Forgot: ${deleted.content.substring(0, 100)}${deleted.content.length > 100 ? '...' : ''}`
-            }]
-        };
-    }
-);
-
-// ==================== CLIENT TOOLS ====================
-
-// Tool: Add a client
-server.tool(
-    'add_client',
-    {
-        name: z.string().describe('Client name'),
-        email: z.string().optional().describe('Client email'),
-        notes: z.string().optional().describe('Notes about the client')
-    },
-    async ({ name, email, notes }) => {
-        const result = await createClient(name, email || '', notes || '');
-
-        if (result.error) {
-            return {
-                content: [{ type: 'text', text: `⚠️ ${result.error}: ${result.client.name}` }]
-            };
-        }
-
-        return {
-            content: [{
-                type: 'text',
-                text: `👤 Client added: **${result.name}**${email ? `\n📧 ${email}` : ''}`
-            }]
-        };
-    }
-);
-
-// Tool: List clients
-server.tool(
-    'list_clients',
-    {},
-    async () => {
-        const clients = await getClients();
-
-        if (clients.length === 0) {
-            return {
-                content: [{ type: 'text', text: '👥 No clients yet. Add one with add_client.' }]
-            };
-        }
-
-        let text = `👥 **Clients** (${clients.length})\n\n`;
-        for (const client of clients) {
-            text += `• **${client.name}**${client.email ? ` - ${client.email}` : ''}\n`;
-        }
-
-        return {
-            content: [{ type: 'text', text }]
-        };
-    }
-);
-
-// ==================== PROJECT TOOLS ====================
-
-// Tool: Create/configure a project
-server.tool(
-    'configure_project',
-    {
-        name: z.string().describe('Project name'),
-        client: z.string().optional().describe('Client name to link'),
-        hourly_rate: z.number().optional().describe('Hourly rate for billing'),
-        notes: z.string().optional().describe('Project notes')
-    },
-    async ({ name, client, hourly_rate, notes }) => {
-        const project = await createProject(name, client || null, hourly_rate || 0, notes || '');
-
-        let text = `📁 Project configured: **${project.name}**`;
-        if (project.clientId) text += `\n👤 Client: ${project.clientId}`;
-        if (project.hourlyRate) text += `\n💰 Rate: €${project.hourlyRate}/hr`;
-
-        return {
-            content: [{ type: 'text', text }]
-        };
-    }
-);
-
-// Tool: List projects with client info
-server.tool(
-    'list_projects_detailed',
-    {
-        client: z.string().optional().describe('Filter by client name')
-    },
-    async ({ client }) => {
-        const projects = await getProjectsWithClients(client || null);
-
-        if (projects.length === 0) {
-            return {
-                content: [{ type: 'text', text: `📁 No projects${client ? ` for client "${client}"` : ''}.` }]
-            };
-        }
-
-        let text = `📁 **Projects** (${projects.length})${client ? ` [${client}]` : ''}\n\n`;
-        for (const p of projects.sort((a, b) => (b.totalMinutes || 0) - (a.totalMinutes || 0))) {
-            text += `• **${p.name}** - ${p.totalFormatted}`;
-            if (p.clientName) text += ` (${p.clientName})`;
-            if (p.hourlyRate) text += ` - €${p.hourlyRate}/hr`;
-            if (p.estimatedValue) text += ` ≈ €${p.estimatedValue}`;
-            text += '\n';
-        }
-
-        return {
-            content: [{ type: 'text', text }]
-        };
-    }
-);
-
-// Tool: Get unbilled time grouped by client with values
-server.tool(
-    'get_invoice_summary',
-    {},
-    async () => {
+    async ({ type, query, category, project, client, personal }) => {
         const auth = checkUser();
         if (auth.error) {
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
 
-        const summary = await getUnbilledByClient(auth.user.id);
+        try {
+            // SEMANTIC SEARCH for memories
+            if (type === 'memories' && query) {
+                const memories = await searchMemories(query, {
+                    limit: 5,
+                    project: project || null,
+                    client: client || null
+                });
+                if (memories.length === 0) {
+                    return { content: [{ type: 'text', text: `🧠 No memories found for: "${query}"` }] };
+                }
+                let text = `🧠 **Memories matching: "${query}"**\n\n`;
+                for (const memory of memories) {
+                    const date = new Date(memory.createdAt).toLocaleDateString();
+                    const score = memory.relevanceScore ? ` (${(memory.relevanceScore * 100).toFixed(0)}%)` : '';
+                    let meta = [];
+                    if (memory.category) meta.push(memory.category);
+                    if (memory.projectId) meta.push(`📁 ${memory.projectId}`);
+                    if (!memory.shared) meta.push('🔒');
+                    text += `• ${memory.content}${meta.length ? ` [${meta.join(', ')}]` : ''} - ${date}${score}\n\n`;
+                }
+                return { content: [{ type: 'text', text }] };
+            }
 
-        if (summary.clients.length === 0) {
-            return {
-                content: [{ type: 'text', text: '💰 No unbilled time.' }]
-            };
+            // LIST MEMORIES
+            if (type === 'memories') {
+                const memories = await getAllMemories({
+                    category: category || null,
+                    project: project || null,
+                    client: client || null,
+                    personal: personal || false
+                });
+                if (memories.length === 0) {
+                    return { content: [{ type: 'text', text: '🧠 No memories found.' }] };
+                }
+                let text = `🧠 **Memories** (${memories.length})\n\n`;
+                for (const memory of memories.slice(-20).reverse()) {
+                    const date = new Date(memory.createdAt).toLocaleDateString();
+                    let meta = [];
+                    if (memory.category) meta.push(memory.category);
+                    if (memory.projectId) meta.push(`📁 ${memory.projectId}`);
+                    if (!memory.shared) meta.push('🔒');
+                    text += `• \`${memory.id}\` ${memory.content.substring(0, 80)}${memory.content.length > 80 ? '...' : ''}${meta.length ? ` [${meta.join(', ')}]` : ''} - ${date}\n`;
+                }
+                return { content: [{ type: 'text', text }] };
+            }
+
+            // LIST IDEAS
+            if (type === 'ideas') {
+                const memories = await getAllMemories({
+                    category: 'idea',
+                    project: project || null,
+                    client: client || null
+                });
+                if (memories.length === 0) {
+                    return { content: [{ type: 'text', text: '💡 No ideas yet.' }] };
+                }
+                let text = `💡 **Ideas** (${memories.length})\n\n`;
+                for (const idea of memories.slice(-20).reverse()) {
+                    const date = new Date(idea.createdAt).toLocaleDateString();
+                    let meta = [];
+                    if (idea.projectId) meta.push('📁 ' + idea.projectId);
+                    text += `• \`${idea.id}\` ${idea.content.substring(0, 80)}${idea.content.length > 80 ? '...' : ''}${meta.length ? ` [${meta.join(', ')}]` : ''} - ${date}\n`;
+                }
+                return { content: [{ type: 'text', text }] };
+            }
+
+            // SEARCH ENTRIES
+            if (type === 'entries') {
+                if (!query) {
+                    return { content: [{ type: 'text', text: '❌ query is required for searching entries' }] };
+                }
+                const entries = await searchEntries(query, 10);
+                if (entries.length === 0) {
+                    return { content: [{ type: 'text', text: `🔍 No entries found for: "${query}"` }] };
+                }
+                let text = `🔍 **Entries matching: "${query}"**\n\n`;
+                for (const entry of entries) {
+                    const date = new Date(entry.createdAt).toLocaleDateString();
+                    const score = entry.relevanceScore ? ` (${(entry.relevanceScore * 100).toFixed(0)}%)` : '';
+                    text += `• **${entry.projectName}** - ${date} - ${entry.durationFormatted}${score}\n  ${entry.description}\n\n`;
+                }
+                return { content: [{ type: 'text', text }] };
+            }
+
+            return { content: [{ type: 'text', text: `❌ Unknown type: ${type}` }] };
+        } catch (error) {
+            return { content: [{ type: 'text', text: `❌ ${error.message}` }] };
+        }
+    }
+);
+
+// ==================== PROJECT & CLIENT TOOLS ====================
+
+// Tool: Manage projects and clients (create/update)
+server.tool(
+    'project_manage',
+    {
+        entity: z.enum(['project', 'client']).describe('What to manage'),
+        action: z.enum(['create', 'update']).describe('Action to perform'),
+        name: z.string().describe('Project or client name'),
+        client: z.string().optional().describe('Client name to link (for project)'),
+        hourly_rate: z.number().optional().describe('Hourly rate for billing (for project)'),
+        notes: z.string().optional().describe('Notes'),
+        email: z.string().optional().describe('Email address (for client)')
+    },
+    async ({ entity, action, name, client, hourly_rate, notes, email }) => {
+        if (entity === 'client') {
+            if (action === 'create') {
+                const result = await createClient(name, email || '', notes || '');
+                if (result.error) {
+                    return { content: [{ type: 'text', text: `⚠️ ${result.error}: ${result.client.name}` }] };
+                }
+                return {
+                    content: [{
+                        type: 'text',
+                        text: `👤 Client added: **${result.name}**${email ? `\n📧 ${email}` : ''}`
+                    }]
+                };
+            }
+            if (action === 'update') {
+                const updated = await updateClient(name, { email, notes });
+                if (!updated) {
+                    return { content: [{ type: 'text', text: `❌ Client "${name}" not found.` }] };
+                }
+                return { content: [{ type: 'text', text: `👤 Updated client: **${updated.name}**` }] };
+            }
         }
 
-        let text = `💰 **Invoice Summary**\n`;
-        text += `⏱️ Total: ${summary.totalFormatted} | €${summary.totalValue}\n\n`;
+        if (entity === 'project') {
+            if (action === 'create') {
+                const project = await createProject(name, client || null, hourly_rate || 0, notes || '');
+                let text = `📁 Project created: **${project.name}**`;
+                if (project.clientId) text += `\n👤 Client: ${project.clientId}`;
+                if (project.hourlyRate) text += `\n💰 Rate: €${project.hourlyRate}/hr`;
+                return { content: [{ type: 'text', text }] };
+            }
+            if (action === 'update') {
+                const updated = await updateProject(name, { clientId: client, hourlyRate: hourly_rate, notes });
+                if (!updated) {
+                    return { content: [{ type: 'text', text: `❌ Project "${name}" not found.` }] };
+                }
+                let text = `📁 Updated project: **${updated.name}**`;
+                if (updated.clientId) text += `\n👤 Client: ${updated.clientId}`;
+                if (updated.hourlyRate) text += `\n💰 Rate: €${updated.hourlyRate}/hr`;
+                return { content: [{ type: 'text', text }] };
+            }
+        }
 
-        for (const client of summary.clients.sort((a, b) => b.value - a.value)) {
-            text += `**${client.clientName}**: ${client.durationFormatted} - €${client.valueFormatted}\n`;
-            for (const project of client.projects) {
-                text += `  • ${project.projectName}: ${project.durationFormatted}`;
-                if (project.hourlyRate) text += ` (€${project.hourlyRate}/hr = €${project.valueFormatted})`;
+        return { content: [{ type: 'text', text: `❌ Unknown entity/action: ${entity}/${action}` }] };
+    }
+);
+
+// Tool: Query projects and clients
+server.tool(
+    'project_query',
+    {
+        entity: z.enum(['projects', 'clients']).describe('What to list'),
+        client: z.string().optional().describe('Filter projects by client'),
+        detailed: z.boolean().optional().describe('Show detailed info (for projects)')
+    },
+    async ({ entity, client, detailed }) => {
+        if (entity === 'clients') {
+            const clients = await getClients();
+            if (clients.length === 0) {
+                return { content: [{ type: 'text', text: '👥 No clients yet. Add one with project_manage.' }] };
+            }
+            let text = `👥 **Clients** (${clients.length})\n\n`;
+            for (const c of clients) {
+                text += `• **${c.name}**${c.email ? ` - ${c.email}` : ''}\n`;
+            }
+            return { content: [{ type: 'text', text }] };
+        }
+
+        if (entity === 'projects') {
+            const projects = await getProjectsWithClients(client || null);
+            if (projects.length === 0) {
+                return { content: [{ type: 'text', text: `📁 No projects${client ? ` for client "${client}"` : ''}.` }] };
+            }
+            let text = `📁 **Projects** (${projects.length})${client ? ` [${client}]` : ''}\n\n`;
+            for (const p of projects.sort((a, b) => (b.totalMinutes || 0) - (a.totalMinutes || 0))) {
+                text += `• **${p.name}** - ${p.totalFormatted}`;
+                if (p.clientName) text += ` (${p.clientName})`;
+                if (detailed !== false && p.hourlyRate) text += ` - €${p.hourlyRate}/hr`;
+                if (detailed !== false && p.estimatedValue) text += ` ≈ €${p.estimatedValue}`;
                 text += '\n';
             }
-            text += '\n';
+            return { content: [{ type: 'text', text }] };
         }
 
-        return {
-            content: [{ type: 'text', text }]
-        };
+        return { content: [{ type: 'text', text: `❌ Unknown entity: ${entity}` }] };
     }
 );
 
@@ -1042,7 +732,7 @@ server.prompt(
 
 // ==================== USER MANAGEMENT TOOLS ====================
 
-// Tool: Get current user info
+// Tool: Get current user info with entity counts
 server.tool(
     'whoami',
     {},
@@ -1053,54 +743,29 @@ server.tool(
         }
 
         const user = auth.user;
-        return {
-            content: [{
-                type: 'text',
-                text: '👤 **' + user.username + '**\n📧 ' + user.email + '\n🏷️ Role: ' + user.role + '\n📅 Last login: ' + (user.lastLogin || 'Never')
-            }]
-        };
-    }
-);
+        const counts = await getEntityCounts(user.id);
 
-// Tool: List all users (admin only)
-server.tool(
-    'list_users',
-    {},
-    async () => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: '🔒 ' + auth.error }] };
-        }
-
-        if (auth.user.role !== 'admin') {
-            return { content: [{ type: 'text', text: '🔒 Admin access required' }] };
-        }
-
-        const users = await getUsers();
-
-        if (users.length === 0) {
-            return { content: [{ type: 'text', text: '👥 No users yet. Complete OAuth authentication first.' }] };
-        }
-
-        let text = '👥 **Users** (' + users.length + ')\n\n';
-        for (const user of users) {
-            const role = user.role === 'admin' ? '👑' : '👤';
-            const lastLogin = user.lastLogin ? ' (last: ' + new Date(user.lastLogin).toLocaleDateString() + ')' : '';
-            text += role + ' **' + user.username + '** - ' + user.email + lastLogin + '\n';
-        }
+        let text = `👤 **${user.username}**\n`;
+        text += `📧 ${user.email}\n`;
+        text += `🏷️ Role: ${user.role}\n`;
+        text += `📅 Last login: ${user.lastLogin || 'Never'}\n\n`;
+        text += `**Your data:**\n`;
+        text += `📁 ${counts.projects} projects | 👥 ${counts.clients} clients\n`;
+        text += `⏱️ ${counts.entries} entries | 📋 ${counts.tasks} tasks | 🧠 ${counts.memories} memories`;
 
         return { content: [{ type: 'text', text }] };
     }
 );
 
-// Tool: Set user role (admin only)
+// Tool: User management (list users, set roles - admin only)
 server.tool(
-    'set_user_role',
+    'user_manage',
     {
-        username: z.string().describe('Username to update'),
-        role: z.enum(['admin', 'member']).describe('New role')
+        action: z.enum(['list', 'set_role']).describe('Action to perform'),
+        username: z.string().optional().describe('Username (for set_role)'),
+        role: z.enum(['admin', 'member']).optional().describe('New role (for set_role)')
     },
-    async ({ username, role }) => {
+    async ({ action, username, role }) => {
         const auth = checkUser();
         if (auth.error) {
             return { content: [{ type: 'text', text: '🔒 ' + auth.error }] };
@@ -1110,292 +775,212 @@ server.tool(
             return { content: [{ type: 'text', text: '🔒 Admin access required' }] };
         }
 
-        const updated = await updateUserAuth(username, { role });
-
-        if (!updated) {
-            return { content: [{ type: 'text', text: '❌ User "' + username + '" not found' }] };
-        }
-
-        const roleIcon = role === 'admin' ? '👑 admin' : '👤 member';
-        return {
-            content: [{
-                type: 'text',
-                text: '✅ ' + updated.username + ' is now ' + roleIcon
-            }]
-        };
-    }
-);
-
-// Tool: Get team activity summary
-server.tool(
-    'team_summary',
-    {},
-    async () => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: '🔒 ' + auth.error }] };
-        }
-
-        const summary = await getTeamTodaySummary();
-
-        let text = '👥 **Team Summary** (' + new Date().toLocaleDateString() + ')\n\n';
-
-        if (summary.members.length === 0) {
-            text += '_No time logged today yet._\n';
-        } else {
-            for (const member of summary.members) {
-                text += '**' + member.username + '** - ' + member.totalFormatted + ' total\n';
-                for (const project of member.projects) {
-                    text += '  • ' + project.name + ': ' + project.durationFormatted + '\n';
-                }
-                text += '\n';
+        if (action === 'list') {
+            const users = await getUsers();
+            if (users.length === 0) {
+                return { content: [{ type: 'text', text: '👥 No users yet. Complete OAuth authentication first.' }] };
             }
+            let text = `👥 **Users** (${users.length})\n\n`;
+            for (const user of users) {
+                const roleIcon = user.role === 'admin' ? '👑' : '👤';
+                const lastLogin = user.lastLogin ? ` (last: ${new Date(user.lastLogin).toLocaleDateString()})` : '';
+                text += `${roleIcon} **${user.username}** - ${user.email}${lastLogin}\n`;
+            }
+            return { content: [{ type: 'text', text }] };
         }
 
-        text += '👥 ' + summary.members.length + ' team member' + (summary.members.length !== 1 ? 's' : '') + ' active today\n';
-        text += '⏱️ Team total: ' + summary.teamTotalFormatted;
+        if (action === 'set_role') {
+            if (!username) {
+                return { content: [{ type: 'text', text: '❌ username is required for set_role action' }] };
+            }
+            if (!role) {
+                return { content: [{ type: 'text', text: '❌ role is required for set_role action' }] };
+            }
+            const updated = await updateUserAuth(username, { role });
+            if (!updated) {
+                return { content: [{ type: 'text', text: `❌ User "${username}" not found` }] };
+            }
+            const roleIcon = role === 'admin' ? '👑 admin' : '👤 member';
+            return { content: [{ type: 'text', text: `✅ ${updated.username} is now ${roleIcon}` }] };
+        }
 
-        return { content: [{ type: 'text', text }] };
+        return { content: [{ type: 'text', text: `❌ Unknown action: ${action}` }] };
     }
 );
 
 // ==================== TASK TOOLS ====================
 
-// Tool: List tasks
+// Tool: Task management (list/create/complete)
 server.tool(
-    'tasks',
+    'task_manage',
     {
-        status: z.enum(['open', 'done', 'all']).optional().describe('Filter by status (default: open)'),
-        project: z.string().optional().describe('Filter by project'),
-        mine: z.boolean().optional().describe('Show only my tasks')
-    },
-    async ({ status, project, mine }) => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
-        }
-
-        const taskList = await getTasks({
-            status: status || 'open',
-            project: project || null,
-            mine: mine || false
-        });
-
-        if (taskList.length === 0) {
-            const statusText = status === 'all' ? '' : (status || 'open');
-            return {
-                content: [{ type: 'text', text: `📋 No ${statusText} tasks${project ? ` for ${project}` : ''}.` }]
-            };
-        }
-
-        let text = `📋 **Tasks** (${taskList.length})\n\n`;
-        for (const task of taskList) {
-            const statusIcon = task.status === 'done' ? '✅' : '⬜';
-            const ytLink = task.youtrackId ? ` [${task.youtrackId}]` : '';
-            const projectTag = task.projectName ? ` 📁 ${task.projectName}` : '';
-            text += `${statusIcon} \`${task.id}\` ${task.title}${ytLink}${projectTag}\n`;
-        }
-
-        return { content: [{ type: 'text', text }] };
-    }
-);
-
-// Tool: Add a task
-server.tool(
-    'add_task',
-    {
-        title: z.string().describe('Task title'),
-        project: z.string().optional().describe('Link to a project'),
-        issue: z.string().optional().describe('YouTrack issue ID (e.g., "PROJ-123")')
-    },
-    async ({ title, project, issue }) => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
-        }
-
-        const task = await createTask(title, project || null, issue || null, auth.user.id);
-
-        let text = `📋 Task added: **${task.title}**`;
-        if (task.projectId) text += `\n📁 Project: ${task.projectId}`;
-        if (task.youtrackId) text += `\n🔗 YouTrack: ${task.youtrackId}`;
-
-        return { content: [{ type: 'text', text }] };
-    }
-);
-
-// Tool: Complete a task
-server.tool(
-    'complete_task',
-    {
-        id: z.string().describe('Task ID'),
+        action: z.enum(['list', 'create', 'complete']).describe('Action to perform'),
+        // For list
+        status: z.enum(['open', 'done', 'all']).optional().describe('Filter by status (for list, default: open)'),
+        project: z.string().optional().describe('Filter by or link to project'),
+        mine: z.boolean().optional().describe('Show only my tasks (for list)'),
+        // For create
+        title: z.string().optional().describe('Task title (for create)'),
+        issue: z.string().optional().describe('YouTrack issue ID e.g. "PROJ-123" (for create)'),
+        // For complete
+        id: z.string().optional().describe('Task ID (for complete)'),
         log_time: z.number().optional().describe('Minutes to log when completing')
     },
-    async ({ id, log_time }) => {
+    async ({ action, status, project, mine, title, issue, id, log_time }) => {
         const auth = checkUser();
         if (auth.error) {
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
 
-        // Get task first to check if it has YouTrack link
-        const task = await getTask(id);
-        if (!task) {
-            return { content: [{ type: 'text', text: `❌ Task "${id}" not found.` }] };
-        }
-
-        // Complete the task locally
-        const result = await completeTask(id, auth.user.id);
-        if (result.error) {
-            return { content: [{ type: 'text', text: `❌ ${result.error}` }] };
-        }
-
-        let text = `✅ Completed: **${task.title}**`;
-
-        // If task is linked to YouTrack, sync the status
-        if (task.youtrackId) {
-            try {
-                const token = await getUserYouTrackToken(auth.user.id);
-                if (token) {
-                    const yt = getYouTrackClient(token);
-
-                    // Log time if specified
-                    if (log_time && log_time > 0) {
-                        await yt.addWorkItem(task.youtrackId, log_time, `Completed: ${task.title}`);
-                        text += `\n⏱️ Logged ${formatDuration(log_time)} to YouTrack`;
-                    }
-
-                    // Resolve the issue in YouTrack
-                    await yt.resolveIssue(task.youtrackId);
-                    text += `\n🔗 YouTrack ${task.youtrackId} resolved`;
-                } else {
-                    text += `\n⚠️ YouTrack not synced (no token). Use connect_youtrack to link your account.`;
-                }
-            } catch (error) {
-                text += `\n⚠️ YouTrack sync failed: ${error.message}`;
+        // LIST
+        if (action === 'list') {
+            const taskList = await getTasks({
+                status: status || 'open',
+                project: project || null,
+                mine: mine || false
+            });
+            if (taskList.length === 0) {
+                const statusText = status === 'all' ? '' : (status || 'open');
+                return { content: [{ type: 'text', text: `📋 No ${statusText} tasks${project ? ` for ${project}` : ''}.` }] };
             }
+            let text = `📋 **Tasks** (${taskList.length})\n\n`;
+            for (const task of taskList) {
+                const statusIcon = task.status === 'done' ? '✅' : '⬜';
+                const ytLink = task.youtrackId ? ` [${task.youtrackId}]` : '';
+                const projectTag = task.projectName ? ` 📁 ${task.projectName}` : '';
+                text += `${statusIcon} \`${task.id}\` ${task.title}${ytLink}${projectTag}\n`;
+            }
+            return { content: [{ type: 'text', text }] };
         }
 
-        return { content: [{ type: 'text', text }] };
+        // CREATE
+        if (action === 'create') {
+            if (!title) {
+                return { content: [{ type: 'text', text: '❌ title is required for create action' }] };
+            }
+            const task = await createTask(title, project || null, issue || null, auth.user.id);
+            let text = `📋 Task added: **${task.title}**`;
+            if (task.projectId) text += `\n📁 Project: ${task.projectId}`;
+            if (task.youtrackId) text += `\n🔗 YouTrack: ${task.youtrackId}`;
+            return { content: [{ type: 'text', text }] };
+        }
+
+        // COMPLETE
+        if (action === 'complete') {
+            if (!id) {
+                return { content: [{ type: 'text', text: '❌ id is required for complete action' }] };
+            }
+            const task = await getTask(id);
+            if (!task) {
+                return { content: [{ type: 'text', text: `❌ Task "${id}" not found.` }] };
+            }
+            const result = await completeTask(id, auth.user.id);
+            if (result.error) {
+                return { content: [{ type: 'text', text: `❌ ${result.error}` }] };
+            }
+            let text = `✅ Completed: **${task.title}**`;
+
+            // If task is linked to YouTrack, sync the status
+            if (task.youtrackId) {
+                try {
+                    const token = await getUserYouTrackToken(auth.user.id);
+                    if (token) {
+                        const yt = getYouTrackClient(token);
+                        if (log_time && log_time > 0) {
+                            await yt.addWorkItem(task.youtrackId, log_time, `Completed: ${task.title}`);
+                            text += `\n⏱️ Logged ${formatDuration(log_time)} to YouTrack`;
+                        }
+                        await yt.resolveIssue(task.youtrackId);
+                        text += `\n🔗 YouTrack ${task.youtrackId} resolved`;
+                    } else {
+                        text += `\n⚠️ YouTrack not synced (no token). Use youtrack action=connect to link.`;
+                    }
+                } catch (error) {
+                    text += `\n⚠️ YouTrack sync failed: ${error.message}`;
+                }
+            }
+            return { content: [{ type: 'text', text }] };
+        }
+
+        return { content: [{ type: 'text', text: `❌ Unknown action: ${action}` }] };
     }
 );
 
 // ==================== YOUTRACK TOOLS ====================
 
-// Tool: Connect YouTrack account
+// Tool: YouTrack integration (connect/list/get/comment/resolve)
 server.tool(
-    'connect_youtrack',
+    'youtrack',
     {
-        token: z.string().describe('Your YouTrack API token (permanent token from YouTrack profile)')
-    },
-    async ({ token }) => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
-        }
-
-        try {
-            // Verify the token works by making a test request
-            const yt = getYouTrackClient(token);
-            await yt.getIssues('', null, 'me');
-
-            // Save the token
-            await setUserYouTrackToken(auth.user.id, token);
-
-            return {
-                content: [{ type: 'text', text: `🔗 YouTrack connected! You can now use \`issues\` to fetch your tasks.` }]
-            };
-        } catch (error) {
-            return {
-                content: [{ type: 'text', text: `❌ Failed to connect: ${error.message}` }]
-            };
-        }
-    }
-);
-
-// Tool: Fetch issues from YouTrack (syncs to local tasks)
-server.tool(
-    'issues',
-    {
-        query: z.string().optional().describe('YouTrack search query'),
-        project: z.string().optional().describe('Filter by YouTrack project'),
-        assignee: z.enum(['me', 'all']).optional().describe('Filter by assignee (default: me)')
-    },
-    async ({ query, project, assignee }) => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
-        }
-
-        const token = await getUserYouTrackToken(auth.user.id);
-        if (!token) {
-            return {
-                content: [{ type: 'text', text: `🔗 YouTrack not connected. Use \`connect_youtrack\` with your API token first.` }]
-            };
-        }
-
-        try {
-            const yt = getYouTrackClient(token);
-            const issues = await yt.getIssues(query || '', project || null, assignee || 'me');
-
-            if (issues.length === 0) {
-                return {
-                    content: [{ type: 'text', text: `📋 No issues found${project ? ` in ${project}` : ''}.` }]
-                };
-            }
-
-            // Sync issues to local tasks
-            let syncedCount = 0;
-            for (const issue of issues) {
-                const status = issue.resolved ? 'done' : 'open';
-                // Use project shortname as local project if available
-                const localProject = issue.project ? issue.project.toLowerCase() : null;
-                await upsertTaskFromYouTrack(issue.id, issue.summary, issue.description || '', status, localProject, auth.user.id);
-                syncedCount++;
-            }
-
-            let text = `📋 **YouTrack Issues** (${issues.length})\n\n`;
-            for (const issue of issues) {
-                const statusIcon = issue.resolved ? '✅' : '⬜';
-                text += `${statusIcon} **${issue.id}** - ${issue.summary}\n`;
-                if (issue.project) text += `   📁 ${issue.project}\n`;
-            }
-            text += `\n🔄 Synced ${syncedCount} issues to local tasks.`;
-
-            return { content: [{ type: 'text', text }] };
-        } catch (error) {
-            return {
-                content: [{ type: 'text', text: `❌ YouTrack error: ${error.message}` }]
-            };
-        }
-    }
-);
-
-// Tool: Get issue details, update status, add comment
-server.tool(
-    'issue',
-    {
-        id: z.string().describe('YouTrack issue ID (e.g., "PROJ-123")'),
-        action: z.enum(['get', 'comment', 'resolve']).optional().describe('Action to perform (default: get)'),
+        action: z.enum(['connect', 'list', 'get', 'comment', 'resolve']).describe('Action to perform'),
+        // For connect
+        token: z.string().optional().describe('YouTrack API token (for connect)'),
+        // For list
+        query: z.string().optional().describe('YouTrack search query (for list)'),
+        project: z.string().optional().describe('Filter by YouTrack project (for list)'),
+        assignee: z.enum(['me', 'all']).optional().describe('Filter by assignee (for list, default: me)'),
+        // For get/comment/resolve
+        id: z.string().optional().describe('Issue ID e.g. "PROJ-123" (for get/comment/resolve)'),
         comment: z.string().optional().describe('Comment text (for comment action)')
     },
-    async ({ id, action, comment }) => {
+    async ({ action, token, query, project, assignee, id, comment }) => {
         const auth = checkUser();
         if (auth.error) {
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
 
-        const token = await getUserYouTrackToken(auth.user.id);
-        if (!token) {
-            return {
-                content: [{ type: 'text', text: `🔗 YouTrack not connected. Use \`connect_youtrack\` with your API token first.` }]
-            };
+        // CONNECT
+        if (action === 'connect') {
+            if (!token) {
+                return { content: [{ type: 'text', text: '❌ token is required for connect action' }] };
+            }
+            try {
+                const yt = getYouTrackClient(token);
+                await yt.getIssues('', null, 'me');
+                await setUserYouTrackToken(auth.user.id, token);
+                return { content: [{ type: 'text', text: `🔗 YouTrack connected! Use action=list to fetch issues.` }] };
+            } catch (error) {
+                return { content: [{ type: 'text', text: `❌ Failed to connect: ${error.message}` }] };
+            }
+        }
+
+        // Check token for other actions
+        const userToken = await getUserYouTrackToken(auth.user.id);
+        if (!userToken) {
+            return { content: [{ type: 'text', text: `🔗 YouTrack not connected. Use action=connect with your API token first.` }] };
         }
 
         try {
-            const yt = getYouTrackClient(token);
-            const actionType = action || 'get';
+            const yt = getYouTrackClient(userToken);
 
-            if (actionType === 'get') {
+            // LIST
+            if (action === 'list') {
+                const issues = await yt.getIssues(query || '', project || null, assignee || 'me');
+                if (issues.length === 0) {
+                    return { content: [{ type: 'text', text: `📋 No issues found${project ? ` in ${project}` : ''}.` }] };
+                }
+                let syncedCount = 0;
+                for (const issue of issues) {
+                    const status = issue.resolved ? 'done' : 'open';
+                    const localProject = issue.project ? issue.project.toLowerCase() : null;
+                    await upsertTaskFromYouTrack(issue.id, issue.summary, issue.description || '', status, localProject, auth.user.id);
+                    syncedCount++;
+                }
+                let text = `📋 **YouTrack Issues** (${issues.length})\n\n`;
+                for (const issue of issues) {
+                    const statusIcon = issue.resolved ? '✅' : '⬜';
+                    text += `${statusIcon} **${issue.id}** - ${issue.summary}\n`;
+                    if (issue.project) text += `   📁 ${issue.project}\n`;
+                }
+                text += `\n🔄 Synced ${syncedCount} issues to local tasks.`;
+                return { content: [{ type: 'text', text }] };
+            }
+
+            // GET
+            if (action === 'get') {
+                if (!id) {
+                    return { content: [{ type: 'text', text: '❌ id is required for get action' }] };
+                }
                 const issue = await yt.getIssue(id);
                 let text = `📋 **${issue.id}** - ${issue.summary}\n\n`;
                 text += `🏷️ State: ${issue.state}\n`;
@@ -1406,275 +991,182 @@ server.tool(
                 return { content: [{ type: 'text', text }] };
             }
 
-            if (actionType === 'comment') {
+            // COMMENT
+            if (action === 'comment') {
+                if (!id) {
+                    return { content: [{ type: 'text', text: '❌ id is required for comment action' }] };
+                }
                 if (!comment) {
-                    return { content: [{ type: 'text', text: `❌ Comment text required.` }] };
+                    return { content: [{ type: 'text', text: '❌ comment is required for comment action' }] };
                 }
                 await yt.addComment(id, comment);
                 return { content: [{ type: 'text', text: `💬 Comment added to ${id}` }] };
             }
 
-            if (actionType === 'resolve') {
+            // RESOLVE
+            if (action === 'resolve') {
+                if (!id) {
+                    return { content: [{ type: 'text', text: '❌ id is required for resolve action' }] };
+                }
                 await yt.resolveIssue(id);
-
-                // Also update local task if it exists
-                const status = 'done';
                 const issue = await yt.getIssue(id);
-                await upsertTaskFromYouTrack(id, issue.summary, issue.description || '', status, null, auth.user.id);
-
+                await upsertTaskFromYouTrack(id, issue.summary, issue.description || '', 'done', null, auth.user.id);
                 return { content: [{ type: 'text', text: `✅ Resolved ${id}` }] };
             }
 
-            return { content: [{ type: 'text', text: `❌ Unknown action: ${actionType}` }] };
+            return { content: [{ type: 'text', text: `❌ Unknown action: ${action}` }] };
         } catch (error) {
-            return {
-                content: [{ type: 'text', text: `❌ YouTrack error: ${error.message}` }]
-            };
+            return { content: [{ type: 'text', text: `❌ YouTrack error: ${error.message}` }] };
         }
     }
 );
 
 // ==================== OBSERVATION TOOLS ====================
 
-// Tool: Store an observation from a Claude Code session
+// Tool: Observation system (observe/summarize/get_context/search)
 server.tool(
-    'observe',
+    'observation',
     {
-        session_id: z.string().describe('Claude session ID'),
-        project: z.string().describe('Project name or path'),
-        type: z.enum(['bugfix', 'feature', 'refactor', 'discovery', 'decision', 'change']).describe('Type of observation'),
-        title: z.string().describe('Short title for the observation'),
+        action: z.enum(['observe', 'summarize', 'get_context', 'search']).describe('Action to perform'),
+        // Common
+        project: z.string().optional().describe('Project name or path'),
+        session_id: z.string().optional().describe('Claude session ID (for observe/summarize)'),
+        // For observe
+        type: z.enum(['bugfix', 'feature', 'refactor', 'discovery', 'decision', 'change']).optional().describe('Type of observation'),
+        title: z.string().optional().describe('Short title (for observe)'),
         subtitle: z.string().optional().describe('One sentence explanation'),
         narrative: z.string().optional().describe('Full context explanation'),
-        facts: z.array(z.string()).optional().describe('Array of self-contained fact statements'),
+        facts: z.array(z.string()).optional().describe('Array of fact statements'),
         concepts: z.array(z.enum(['how-it-works', 'why-it-exists', 'problem-solution', 'gotcha', 'pattern', 'trade-off'])).optional().describe('Concept tags'),
         files_read: z.array(z.string()).optional().describe('Files that were read'),
         files_modified: z.array(z.string()).optional().describe('Files that were modified'),
-        tool_name: z.string().optional().describe('Tool that triggered this observation'),
-        tool_input: z.string().optional().describe('Tool input (sanitized)')
-    },
-    async ({ session_id, project, type, title, subtitle, narrative, facts, concepts, files_read, files_modified, tool_name, tool_input }) => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
-        }
-
-        try {
-            const observation = await createObservation({
-                sessionId: session_id,
-                userId: auth.user.id,
-                project,
-                type,
-                title,
-                subtitle,
-                narrative,
-                facts,
-                concepts,
-                filesRead: files_read,
-                filesModified: files_modified,
-                toolName: tool_name,
-                toolInput: tool_input
-            });
-
-            return {
-                content: [{ type: 'text', text: `📝 Observation stored: ${title}` }]
-            };
-        } catch (error) {
-            return {
-                content: [{ type: 'text', text: `❌ Failed to store observation: ${error.message}` }]
-            };
-        }
-    }
-);
-
-// Tool: Create a session summary
-server.tool(
-    'summarize_session',
-    {
-        session_id: z.string().describe('Claude session ID'),
-        project: z.string().describe('Project name or path'),
-        request: z.string().describe('What the user asked for'),
+        tool_name: z.string().optional().describe('Tool that triggered observation'),
+        tool_input: z.string().optional().describe('Tool input (sanitized)'),
+        // For summarize
+        request: z.string().optional().describe('What user asked for (for summarize)'),
         investigated: z.string().optional().describe('What was looked into'),
         learned: z.string().optional().describe('Key insights discovered'),
         completed: z.string().optional().describe('What was delivered'),
         next_steps: z.string().optional().describe('Recommended follow-ups'),
         notes: z.string().optional().describe('Additional context'),
-        files_read: z.array(z.string()).optional().describe('Files that were read'),
-        files_edited: z.array(z.string()).optional().describe('Files that were edited')
+        files_edited: z.array(z.string()).optional().describe('Files that were edited'),
+        // For get_context/search
+        query: z.string().optional().describe('Search query (for search)'),
+        limit: z.number().optional().describe('Max results'),
+        include_summaries: z.boolean().optional().describe('Include summaries (for get_context)')
     },
-    async ({ session_id, project, request, investigated, learned, completed, next_steps, notes, files_read, files_edited }) => {
+    async (params) => {
         const auth = checkUser();
         if (auth.error) {
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
 
-        try {
-            const summary = await createSessionSummary({
-                sessionId: session_id,
-                userId: auth.user.id,
-                project,
-                request,
-                investigated,
-                learned,
-                completed,
-                nextSteps: next_steps,
-                notes,
-                filesRead: files_read,
-                filesEdited: files_edited
-            });
+        const { action, project, session_id, type, title, subtitle, narrative, facts, concepts,
+            files_read, files_modified, tool_name, tool_input, request, investigated, learned,
+            completed, next_steps, notes, files_edited, query, limit, include_summaries } = params;
 
-            return {
-                content: [{ type: 'text', text: `📋 Session summary saved for: ${request.slice(0, 50)}...` }]
-            };
-        } catch (error) {
-            return {
-                content: [{ type: 'text', text: `❌ Failed to save summary: ${error.message}` }]
-            };
-        }
-    }
-);
-
-// Tool: Get context for a session (observations + summaries)
-server.tool(
-    'get_context',
-    {
-        project: z.string().describe('Project name or path'),
-        limit: z.number().optional().describe('Max observations to return (default: 20)'),
-        include_summaries: z.boolean().optional().describe('Include recent session summaries (default: true)')
-    },
-    async ({ project, limit, include_summaries }) => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
-        }
+        const typeIcons = {
+            bugfix: '🐛', feature: '✨', refactor: '♻️',
+            discovery: '🔍', decision: '🎯', change: '📝'
+        };
 
         try {
-            const maxObs = limit || 20;
-            const includeSummaries = include_summaries !== false;
-
-            // Get recent observations for this project
-            const obs = await getObservations({
-                project,
-                userId: auth.user.id,
-                limit: maxObs
-            });
-
-            // Get recent session summaries
-            const summaries = includeSummaries ? await getSessionSummaries({
-                project,
-                userId: auth.user.id,
-                limit: 5
-            }) : [];
-
-            if (obs.length === 0 && summaries.length === 0) {
-                return {
-                    content: [{ type: 'text', text: `📭 No context found for project: ${project}` }]
-                };
-            }
-
-            // Format context for injection
-            let text = `# Context for ${project}\n\n`;
-
-            if (summaries.length > 0) {
-                text += `## Recent Sessions\n\n`;
-                for (const s of summaries) {
-                    text += `### ${s.request}\n`;
-                    if (s.completed) text += `**Completed:** ${s.completed}\n`;
-                    if (s.learned) text += `**Learned:** ${s.learned}\n`;
-                    if (s.nextSteps) text += `**Next:** ${s.nextSteps}\n`;
-                    text += '\n';
+            // OBSERVE
+            if (action === 'observe') {
+                if (!session_id || !project || !type || !title) {
+                    return { content: [{ type: 'text', text: '❌ session_id, project, type, and title are required for observe' }] };
                 }
+                await createObservation({
+                    sessionId: session_id, userId: auth.user.id, project, type, title, subtitle,
+                    narrative, facts, concepts, filesRead: files_read, filesModified: files_modified,
+                    toolName: tool_name, toolInput: tool_input
+                });
+                return { content: [{ type: 'text', text: `📝 Observation stored: ${title}` }] };
             }
 
-            if (obs.length > 0) {
-                text += `## Observations (${obs.length})\n\n`;
+            // SUMMARIZE
+            if (action === 'summarize') {
+                if (!session_id || !project || !request) {
+                    return { content: [{ type: 'text', text: '❌ session_id, project, and request are required for summarize' }] };
+                }
+                await createSessionSummary({
+                    sessionId: session_id, userId: auth.user.id, project, request,
+                    investigated, learned, completed, nextSteps: next_steps, notes,
+                    filesRead: files_read, filesEdited: files_edited
+                });
+                return { content: [{ type: 'text', text: `📋 Session summary saved for: ${request.slice(0, 50)}...` }] };
+            }
 
-                // Group by type
-                const typeIcons = {
-                    bugfix: '🐛',
-                    feature: '✨',
-                    refactor: '♻️',
-                    discovery: '🔍',
-                    decision: '🎯',
-                    change: '📝'
-                };
+            // GET_CONTEXT
+            if (action === 'get_context') {
+                if (!project) {
+                    return { content: [{ type: 'text', text: '❌ project is required for get_context' }] };
+                }
+                const maxObs = limit || 20;
+                const obs = await getObservations({ project, userId: auth.user.id, limit: maxObs });
+                const summaries = include_summaries !== false ? await getSessionSummaries({
+                    project, userId: auth.user.id, limit: 5
+                }) : [];
 
-                for (const o of obs) {
-                    const icon = typeIcons[o.type] || '📌';
-                    text += `${icon} **${o.title}**`;
-                    if (o.subtitle) text += ` - ${o.subtitle}`;
-                    text += '\n';
-                    if (o.facts && o.facts.length > 0) {
-                        for (const fact of o.facts.slice(0, 3)) {
-                            text += `  • ${fact}\n`;
+                if (obs.length === 0 && summaries.length === 0) {
+                    return { content: [{ type: 'text', text: `📭 No context found for project: ${project}` }] };
+                }
+
+                let text = `# Context for ${project}\n\n`;
+                if (summaries.length > 0) {
+                    text += `## Recent Sessions\n\n`;
+                    for (const s of summaries) {
+                        text += `### ${s.request}\n`;
+                        if (s.completed) text += `**Completed:** ${s.completed}\n`;
+                        if (s.learned) text += `**Learned:** ${s.learned}\n`;
+                        if (s.nextSteps) text += `**Next:** ${s.nextSteps}\n`;
+                        text += '\n';
+                    }
+                }
+                if (obs.length > 0) {
+                    text += `## Observations (${obs.length})\n\n`;
+                    for (const o of obs) {
+                        const icon = typeIcons[o.type] || '📌';
+                        text += `${icon} **${o.title}**`;
+                        if (o.subtitle) text += ` - ${o.subtitle}`;
+                        text += '\n';
+                        if (o.facts && o.facts.length > 0) {
+                            for (const fact of o.facts.slice(0, 3)) {
+                                text += `  • ${fact}\n`;
+                            }
                         }
                     }
                 }
+                return { content: [{ type: 'text', text }] };
             }
 
-            return { content: [{ type: 'text', text }] };
+            // SEARCH
+            if (action === 'search') {
+                if (!query) {
+                    return { content: [{ type: 'text', text: '❌ query is required for search' }] };
+                }
+                const results = await searchObservations(query, {
+                    project, type, userId: auth.user.id, limit: limit || 10
+                });
+                if (results.length === 0) {
+                    return { content: [{ type: 'text', text: `🔍 No observations found for: "${query}"` }] };
+                }
+                let text = `🔍 **Search Results** (${results.length})\n\n`;
+                for (const o of results) {
+                    const icon = typeIcons[o.type] || '📌';
+                    text += `${icon} **${o.title}**`;
+                    if (o.project) text += ` (${o.project})`;
+                    text += '\n';
+                    if (o.subtitle) text += `   ${o.subtitle}\n`;
+                    if (o.narrative) text += `   ${o.narrative.slice(0, 150)}...\n`;
+                    text += '\n';
+                }
+                return { content: [{ type: 'text', text }] };
+            }
+
+            return { content: [{ type: 'text', text: `❌ Unknown action: ${action}` }] };
         } catch (error) {
-            return {
-                content: [{ type: 'text', text: `❌ Failed to get context: ${error.message}` }]
-            };
-        }
-    }
-);
-
-// Tool: Search observations
-server.tool(
-    'search_observations',
-    {
-        query: z.string().describe('Search query'),
-        project: z.string().optional().describe('Filter by project'),
-        type: z.enum(['bugfix', 'feature', 'refactor', 'discovery', 'decision', 'change']).optional().describe('Filter by type'),
-        limit: z.number().optional().describe('Max results (default: 10)')
-    },
-    async ({ query, project, type, limit }) => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
-        }
-
-        try {
-            const results = await searchObservations(query, {
-                project,
-                type,
-                userId: auth.user.id,
-                limit: limit || 10
-            });
-
-            if (results.length === 0) {
-                return {
-                    content: [{ type: 'text', text: `🔍 No observations found for: "${query}"` }]
-                };
-            }
-
-            const typeIcons = {
-                bugfix: '🐛',
-                feature: '✨',
-                refactor: '♻️',
-                discovery: '🔍',
-                decision: '🎯',
-                change: '📝'
-            };
-
-            let text = `🔍 **Search Results** (${results.length})\n\n`;
-            for (const o of results) {
-                const icon = typeIcons[o.type] || '📌';
-                text += `${icon} **${o.title}**`;
-                if (o.project) text += ` (${o.project})`;
-                text += '\n';
-                if (o.subtitle) text += `   ${o.subtitle}\n`;
-                if (o.narrative) text += `   ${o.narrative.slice(0, 150)}...\n`;
-                text += '\n';
-            }
-
-            return { content: [{ type: 'text', text }] };
-        } catch (error) {
-            return {
-                content: [{ type: 'text', text: `❌ Search failed: ${error.message}` }]
-            };
+            return { content: [{ type: 'text', text: `❌ ${error.message}` }] };
         }
     }
 );
@@ -2046,254 +1538,106 @@ server.tool(
     }
 );
 
-// Tool: Check if Calq configuration needs updating
+// Tool: Manage Calq components (CRUD + list + check_update)
 server.tool(
-    'calq_check_update',
+    'component_manage',
     {
-        current_version: z.string().optional().describe('Current installed version from .claude/calq/manifest.json')
-    },
-    async ({ current_version }) => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
-        }
-
-        if (!current_version) {
-            return {
-                content: [{
-                    type: 'text',
-                    text: `📦 **Calq not installed**\n\nNo manifest found. Use the \`install\` tool to set up Calq in this project.`
-                }]
-            };
-        }
-
-        const isOutdated = current_version !== CALQ_CONFIG_VERSION;
-
-        if (isOutdated) {
-            return {
-                content: [{
-                    type: 'text',
-                    text: `🔄 **Update available**\n\n` +
-                          `Installed: v${current_version}\n` +
-                          `Latest: v${CALQ_CONFIG_VERSION}\n\n` +
-                          `Use the \`install\` tool to update your Calq configuration.`
-                }]
-            };
-        }
-
-        return {
-            content: [{
-                type: 'text',
-                text: `✅ **Calq is up to date**\n\nVersion: v${CALQ_CONFIG_VERSION}`
-            }]
-        };
-    }
-);
-
-// Tool: Get specific component files
-server.tool(
-    'calq_get_component',
-    {
-        component: z.enum(['hooks', 'commands', 'skills', 'agents', 'output-styles']).describe('Component type to retrieve'),
-        name: z.string().optional().describe('Specific component name (e.g., "calq-reviewer" for agents)')
-    },
-    async ({ component, name }) => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
-        }
-
-        const baseUrl = process.env.BASE_URL || 'https://mcp.calq.nl';
-        const config = generateCalqConfig(baseUrl);
-
-        // Filter files by component from builtin config
-        const componentPath = `/${component}/`;
-        const files = {};
-
-        for (const [path, content] of Object.entries(config.files)) {
-            if (path.includes(componentPath)) {
-                if (name) {
-                    // Filter by specific name
-                    if (path.includes(name)) {
-                        files[path] = content;
-                    }
-                } else {
-                    files[path] = content;
-                }
-            }
-        }
-
-        // Also check database for community components
-        const typeMap = {
-            'hooks': 'hook',
-            'commands': 'command',
-            'skills': 'skill',
-            'agents': 'agent',
-            'output-styles': 'output-style'
-        };
-        const dbType = typeMap[component];
-
-        if (dbType) {
-            if (name) {
-                // Fetch specific component from DB
-                const dbComponent = await getComponent(dbType, name);
-                if (dbComponent) {
-                    const ext = dbType === 'hook' ? 'js' : 'md';
-                    const dir = component === 'hooks' ? 'calq/hooks' : component;
-                    files[`.claude/${dir}/${dbComponent.name}.${ext}`] = dbComponent.content;
-                }
-            } else {
-                // Fetch all components of this type from DB
-                const dbComponents = await getComponents({ type: dbType, includeBuiltin: false });
-                for (const comp of dbComponents) {
-                    const ext = dbType === 'hook' ? 'js' : 'md';
-                    const dir = component === 'hooks' ? 'calq/hooks' : component;
-                    files[`.claude/${dir}/${comp.name}.${ext}`] = comp.content;
-                }
-            }
-        }
-
-        if (Object.keys(files).length === 0) {
-            return {
-                content: [{
-                    type: 'text',
-                    text: `❌ No ${component} found${name ? ` matching "${name}"` : ''}`
-                }]
-            };
-        }
-
-        let text = `# Calq ${component}\n\n`;
-        for (const [path, content] of Object.entries(files)) {
-            const ext = path.split('.').pop();
-            const lang = ext === 'json' ? 'json' : ext === 'js' ? 'javascript' : 'markdown';
-            text += `## \`${path}\`\n\n\`\`\`${lang}\n${content}\n\`\`\`\n\n`;
-        }
-
-        return { content: [{ type: 'text', text }] };
-    }
-);
-
-// Tool: List available Calq components (builtin + user-contributed)
-server.tool(
-    'calq_list_components',
-    {
-        type: z.enum(['hooks', 'commands', 'skills', 'agents', 'output-styles', 'all']).optional()
-            .describe('Filter by component type (default: all)')
-    },
-    async ({ type }) => {
-        const auth = checkUser();
-        if (auth.error) {
-            return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
-        }
-
-        const baseUrl = process.env.BASE_URL || 'https://mcp.calq.nl';
-        const config = generateCalqConfig(baseUrl);
-
-        // Get builtin components from config
-        const builtinComponents = {
-            hooks: [],
-            commands: [],
-            skills: [],
-            agents: [],
-            'output-styles': []
-        };
-
-        for (const path of Object.keys(config.files)) {
-            const filename = path.split('/').pop();
-            if (path.includes('/hooks/') && filename.endsWith('.js')) {
-                builtinComponents.hooks.push({ name: filename.replace('.js', ''), builtin: true });
-            } else if (path.includes('/commands/')) {
-                builtinComponents.commands.push({ name: filename.replace('.md', ''), builtin: true });
-            } else if (path.includes('/skills/')) {
-                builtinComponents.skills.push({ name: filename.replace('.md', ''), builtin: true });
-            } else if (path.includes('/agents/')) {
-                builtinComponents.agents.push({ name: filename.replace('.md', ''), builtin: true });
-            } else if (path.includes('/output-styles/')) {
-                builtinComponents['output-styles'].push({ name: filename.replace('.md', ''), builtin: true });
-            }
-        }
-
-        // Get user-contributed components from database
-        const dbComponents = await getComponents();
-
-        // Track which builtins have community overrides
-        const overrides = new Set();
-        for (const comp of dbComponents) {
-            // Map db type to list type
-            const typeMap = { 'agent': 'agents', 'skill': 'skills', 'command': 'commands', 'output-style': 'output-styles', 'hook': 'hooks' };
-            const listType = typeMap[comp.type];
-            if (!listType || !builtinComponents[listType]) continue;
-
-            // Check if this overrides a builtin
-            const builtinMatch = builtinComponents[listType].find(b => b.name === comp.name && b.builtin);
-            if (builtinMatch) {
-                overrides.add(`${listType}:${comp.name}`);
-                builtinMatch.overriddenBy = comp.authorId || 'team';
-                builtinMatch.overrideDescription = comp.description;
-            } else {
-                builtinComponents[listType].push({
-                    name: comp.name,
-                    builtin: false,
-                    author: comp.authorId,
-                    description: comp.description
-                });
-            }
-        }
-
-        let text = `# Calq Components v${CALQ_CONFIG_VERSION}\n\n`;
-
-        const typeFilter = type === 'all' ? null : type;
-        const types = typeFilter ? [typeFilter] : ['hooks', 'commands', 'skills', 'agents', 'output-styles'];
-
-        for (const t of types) {
-            const items = builtinComponents[t] || [];
-            if (items.length === 0) continue;
-
-            text += `## ${t.charAt(0).toUpperCase() + t.slice(1)}\n`;
-            for (const item of items) {
-                const prefix = t === 'commands' ? '/' : '';
-                if (item.builtin && item.overriddenBy) {
-                    // Builtin with community override
-                    text += `- ${prefix}${item.name} *(overridden by ${item.overriddenBy})*\n`;
-                    if (item.overrideDescription) text += `  ${item.overrideDescription}\n`;
-                } else if (item.builtin) {
-                    text += `- ${prefix}${item.name}\n`;
-                } else {
-                    text += `- ${prefix}${item.name} *(by ${item.author || 'team'})*\n`;
-                    if (item.description) text += `  ${item.description}\n`;
-                }
-            }
-            text += '\n';
-        }
-
-        text += `---\n`;
-        text += `Use \`install\` to install components, \`calq_manage_component\` to create/update/delete.\n`;
-        text += `TIP: Use Claude Code builtin docs for component format reference.`;
-
-        return { content: [{ type: 'text', text }] };
-    }
-);
-
-// Tool: Manage components in the shared registry (CRUD)
-server.tool(
-    'calq_manage_component',
-    {
-        action: z.enum(['create', 'read', 'update', 'delete']).describe('Action to perform'),
-        type: z.enum(['agent', 'skill', 'command', 'output-style']).describe('Component type. TIP: Use Claude Code builtin docs to lookup format (e.g. "how do claude code agents work")'),
-        name: z.string().describe('Component name (e.g., "my-reviewer"). Use same name as builtin to override it with improved version.'),
+        action: z.enum(['create', 'read', 'update', 'delete', 'list', 'check_update']).describe('Action to perform'),
+        // For CRUD operations
+        type: z.enum(['agent', 'skill', 'command', 'output-style', 'hook']).optional()
+            .describe('Component type (required for create/read/update/delete, optional filter for list)'),
+        name: z.string().optional().describe('Component name (required for create/read/update/delete)'),
         description: z.string().optional().describe('Brief description (required for create/update)'),
-        content: z.string().optional().describe('Full markdown content with YAML frontmatter. TIP: Use Claude Code builtin docs for format examples. Required for create/update.'),
-        version: z.string().optional().describe('Version string (default: 1.0.0)')
+        content: z.string().optional().describe('Full markdown content. TIP: Use Claude Code docs for format. Required for create/update.'),
+        version: z.string().optional().describe('Version string (default: 1.0.0)'),
+        // For check_update
+        current_version: z.string().optional().describe('Current installed version from manifest.json (for check_update)')
     },
-    async ({ action, type, name, description, content, version }) => {
+    async ({ action, type, name, description, content, version, current_version }) => {
         const auth = checkUser();
         if (auth.error) {
             return { content: [{ type: 'text', text: `🔒 ${auth.error}` }] };
         }
+
+        const baseUrl = process.env.BASE_URL || 'https://mcp.calq.nl';
 
         try {
-            // READ - Get component details
+            // CHECK_UPDATE
+            if (action === 'check_update') {
+                if (!current_version) {
+                    return { content: [{ type: 'text', text: `📦 **Calq not installed**\n\nNo manifest found. Use the \`install\` tool to set up Calq.` }] };
+                }
+                const isOutdated = current_version !== CALQ_CONFIG_VERSION;
+                if (isOutdated) {
+                    return { content: [{ type: 'text', text: `🔄 **Update available**\n\nInstalled: v${current_version}\nLatest: v${CALQ_CONFIG_VERSION}\n\nUse \`install\` to update.` }] };
+                }
+                return { content: [{ type: 'text', text: `✅ **Calq is up to date**\n\nVersion: v${CALQ_CONFIG_VERSION}` }] };
+            }
+
+            // LIST
+            if (action === 'list') {
+                const config = generateCalqConfig(baseUrl);
+                const builtinComponents = { hooks: [], commands: [], skills: [], agents: [], 'output-styles': [] };
+
+                for (const path of Object.keys(config.files)) {
+                    const filename = path.split('/').pop();
+                    if (path.includes('/hooks/') && filename.endsWith('.js')) {
+                        builtinComponents.hooks.push({ name: filename.replace('.js', ''), builtin: true });
+                    } else if (path.includes('/commands/')) {
+                        builtinComponents.commands.push({ name: filename.replace('.md', ''), builtin: true });
+                    } else if (path.includes('/skills/')) {
+                        builtinComponents.skills.push({ name: filename.replace('.md', ''), builtin: true });
+                    } else if (path.includes('/agents/')) {
+                        builtinComponents.agents.push({ name: filename.replace('.md', ''), builtin: true });
+                    } else if (path.includes('/output-styles/')) {
+                        builtinComponents['output-styles'].push({ name: filename.replace('.md', ''), builtin: true });
+                    }
+                }
+
+                const dbComponents = await getComponents();
+                const typeMap = { 'agent': 'agents', 'skill': 'skills', 'command': 'commands', 'output-style': 'output-styles', 'hook': 'hooks' };
+
+                for (const comp of dbComponents) {
+                    const listType = typeMap[comp.type];
+                    if (!listType || !builtinComponents[listType]) continue;
+                    const builtinMatch = builtinComponents[listType].find(b => b.name === comp.name && b.builtin);
+                    if (builtinMatch) {
+                        builtinMatch.overriddenBy = comp.authorId || 'team';
+                        builtinMatch.overrideDescription = comp.description;
+                    } else {
+                        builtinComponents[listType].push({ name: comp.name, builtin: false, author: comp.authorId, description: comp.description });
+                    }
+                }
+
+                let text = `# Calq Components v${CALQ_CONFIG_VERSION}\n\n`;
+                const typeFilter = type ? typeMap[type] || type : null;
+                const types = typeFilter ? [typeFilter] : ['hooks', 'commands', 'skills', 'agents', 'output-styles'];
+
+                for (const t of types) {
+                    const items = builtinComponents[t] || [];
+                    if (items.length === 0) continue;
+                    text += `## ${t.charAt(0).toUpperCase() + t.slice(1)}\n`;
+                    for (const item of items) {
+                        const prefix = t === 'commands' ? '/' : '';
+                        if (item.builtin && item.overriddenBy) {
+                            text += `- ${prefix}${item.name} *(overridden by ${item.overriddenBy})*\n`;
+                        } else if (item.builtin) {
+                            text += `- ${prefix}${item.name}\n`;
+                        } else {
+                            text += `- ${prefix}${item.name} *(by ${item.author || 'team'})*\n`;
+                        }
+                    }
+                    text += '\n';
+                }
+                text += `---\nUse \`install\` to install, \`component_manage\` for CRUD.`;
+                return { content: [{ type: 'text', text }] };
+            }
+
+            // READ
             if (action === 'read') {
+                if (!type || !name) {
+                    return { content: [{ type: 'text', text: '❌ type and name are required for read' }] };
+                }
                 const comp = await getComponent(type, name);
                 if (!comp) {
                     return { content: [{ type: 'text', text: `❌ Component not found: ${type}/${name}` }] };
@@ -2301,17 +1645,16 @@ server.tool(
                 return {
                     content: [{
                         type: 'text',
-                        text: `# ${type}/${comp.name}\n\n` +
-                              `**Version:** ${comp.version}\n` +
-                              `**Author:** ${comp.authorId || 'builtin'}\n` +
-                              `**Description:** ${comp.description || 'No description'}\n\n` +
-                              `## Content\n\n\`\`\`markdown\n${comp.content}\n\`\`\``
+                        text: `# ${type}/${comp.name}\n\n**Version:** ${comp.version}\n**Author:** ${comp.authorId || 'builtin'}\n**Description:** ${comp.description || 'No description'}\n\n## Content\n\n\`\`\`markdown\n${comp.content}\n\`\`\``
                     }]
                 };
             }
 
-            // DELETE - Remove component
+            // DELETE
             if (action === 'delete') {
+                if (!type || !name) {
+                    return { content: [{ type: 'text', text: '❌ type and name are required for delete' }] };
+                }
                 const deleted = await deleteComponent(type, name);
                 if (!deleted) {
                     return { content: [{ type: 'text', text: `❌ Component not found: ${type}/${name}` }] };
@@ -2319,20 +1662,20 @@ server.tool(
                 return { content: [{ type: 'text', text: `🗑️ Deleted: ${type}/${deleted.name}` }] };
             }
 
-            // CREATE / UPDATE - Publish or update component
+            // CREATE / UPDATE
             if (action === 'create' || action === 'update') {
+                if (!type || !name) {
+                    return { content: [{ type: 'text', text: `❌ type and name are required for ${action}` }] };
+                }
                 if (!content) {
-                    return { content: [{ type: 'text', text: `❌ Content is required for ${action}` }] };
+                    return { content: [{ type: 'text', text: `❌ content is required for ${action}` }] };
                 }
                 if (!description) {
-                    return { content: [{ type: 'text', text: `❌ Description is required for ${action}` }] };
+                    return { content: [{ type: 'text', text: `❌ description is required for ${action}` }] };
                 }
 
                 const result = await publishComponent({
-                    type,
-                    name,
-                    description,
-                    content,
+                    type, name, description, content,
                     authorId: auth.user.id,
                     version: version || '1.0.0'
                 });
@@ -2341,10 +1684,7 @@ server.tool(
                 return {
                     content: [{
                         type: 'text',
-                        text: `✅ **${actionWord}:** ${type}/${result.name}\n\n` +
-                              `Version: ${result.version}\n` +
-                              `Description: ${description}\n\n` +
-                              `Team members can now install this with \`install\`.`
+                        text: `✅ **${actionWord}:** ${type}/${result.name}\n\nVersion: ${result.version}\nDescription: ${description}\n\nTeam members can now install this with \`install\`.`
                     }]
                 };
             }
