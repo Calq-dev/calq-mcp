@@ -192,10 +192,10 @@ export const sessionSummaries = pgTable('session_summaries', {
     index('idx_session_summaries_created').on(table.createdAt),
 ]);
 
-// Calq Components - shared registry for agents, skills, commands, output-styles
+// Calq Components - shared registry for agents, skills, commands, output-styles, rules
 export const calqComponents = pgTable('calq_components', {
     id: text('id').primaryKey(),
-    type: text('type').notNull(),  // 'agent', 'skill', 'command', 'output-style', 'hook'
+    type: text('type').notNull(),  // 'agent', 'skill', 'command', 'output-style', 'hook', 'rule'
     name: text('name').notNull(),  // e.g., 'calq-reviewer', 'my-custom-agent'
     description: text('description'),
     content: text('content').notNull(),  // The actual markdown/json/js content

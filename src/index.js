@@ -1428,6 +1428,25 @@ When completing tasks, structure your response to highlight learnings:
 
 This helps build team knowledge over time.`;
 
+    // Rules (modular rules in .claude/rules/ directory)
+    config.files['.claude/rules/no-title-case.md'] = `---
+description: Avoid title case in headings and titles
+---
+
+# No title case
+
+When writing titles, headings, or labels, use sentence case instead of title case.
+
+**Do this:** "This is a title"
+**Not this:** "This Is A Title"
+
+This applies to:
+- Markdown headings
+- UI labels and buttons
+- Documentation titles
+- Commit message subjects
+- PR titles`;
+
     return config;
 }
 
@@ -1435,7 +1454,7 @@ This helps build team knowledge over time.`;
 server.tool(
     'install',
     {
-        components: z.array(z.enum(['hooks', 'commands', 'skills', 'agents', 'output-styles', 'all'])).optional()
+        components: z.array(z.enum(['hooks', 'commands', 'skills', 'agents', 'output-styles', 'rules', 'all'])).optional()
             .describe('Components to install (default: all)'),
         force: z.boolean().optional().describe('Force reinstall even if up to date'),
         include_community: z.boolean().optional().describe('Include team-contributed components (default: true)')
@@ -1456,6 +1475,7 @@ server.tool(
         const includeSkills = includeAll || components.includes('skills');
         const includeAgents = includeAll || components.includes('agents');
         const includeOutputStyles = includeAll || components.includes('output-styles');
+        const includeRules = includeAll || components.includes('rules');
         const includeCommunity = include_community !== false;
 
         const filteredFiles = {};
@@ -1472,6 +1492,8 @@ server.tool(
                 filteredFiles[path] = content;
             } else if (path.includes('/output-styles/') && includeOutputStyles) {
                 filteredFiles[path] = content;
+            } else if (path.includes('/rules/') && includeRules) {
+                filteredFiles[path] = content;
             }
         }
 
@@ -1485,7 +1507,8 @@ server.tool(
                     'skill': 'skills',
                     'command': 'commands',
                     'output-style': 'output-styles',
-                    'hook': 'calq/hooks'
+                    'hook': 'calq/hooks',
+                    'rule': 'rules'
                 };
                 const dir = dirMap[comp.type];
                 if (!dir) continue;
@@ -1496,7 +1519,8 @@ server.tool(
                     (comp.type === 'skill' && includeSkills) ||
                     (comp.type === 'command' && includeCommands) ||
                     (comp.type === 'output-style' && includeOutputStyles) ||
-                    (comp.type === 'hook' && includeHooks)
+                    (comp.type === 'hook' && includeHooks) ||
+                    (comp.type === 'rule' && includeRules)
                 );
 
                 if (shouldInclude) {
@@ -1544,7 +1568,7 @@ server.tool(
     {
         action: z.enum(['create', 'read', 'update', 'delete', 'list', 'check_update']).describe('Action to perform'),
         // For CRUD operations
-        type: z.enum(['agent', 'skill', 'command', 'output-style', 'hook']).optional()
+        type: z.enum(['agent', 'skill', 'command', 'output-style', 'hook', 'rule']).optional()
             .describe('Component type (required for create/read/update/delete, optional filter for list)'),
         name: z.string().optional().describe('Component name (required for create/read/update/delete)'),
         description: z.string().optional().describe('Brief description (required for create/update)'),
@@ -1577,7 +1601,7 @@ server.tool(
             // LIST
             if (action === 'list') {
                 const config = generateCalqConfig(baseUrl);
-                const builtinComponents = { hooks: [], commands: [], skills: [], agents: [], 'output-styles': [] };
+                const builtinComponents = { hooks: [], commands: [], skills: [], agents: [], 'output-styles': [], rules: [] };
 
                 for (const path of Object.keys(config.files)) {
                     const filename = path.split('/').pop();
@@ -1591,11 +1615,13 @@ server.tool(
                         builtinComponents.agents.push({ name: filename.replace('.md', ''), builtin: true });
                     } else if (path.includes('/output-styles/')) {
                         builtinComponents['output-styles'].push({ name: filename.replace('.md', ''), builtin: true });
+                    } else if (path.includes('/rules/')) {
+                        builtinComponents.rules.push({ name: filename.replace('.md', ''), builtin: true });
                     }
                 }
 
                 const dbComponents = await getComponents();
-                const typeMap = { 'agent': 'agents', 'skill': 'skills', 'command': 'commands', 'output-style': 'output-styles', 'hook': 'hooks' };
+                const typeMap = { 'agent': 'agents', 'skill': 'skills', 'command': 'commands', 'output-style': 'output-styles', 'hook': 'hooks', 'rule': 'rules' };
 
                 for (const comp of dbComponents) {
                     const listType = typeMap[comp.type];
@@ -1611,7 +1637,7 @@ server.tool(
 
                 let text = `# Calq Components v${CALQ_CONFIG_VERSION}\n\n`;
                 const typeFilter = type ? typeMap[type] || type : null;
-                const types = typeFilter ? [typeFilter] : ['hooks', 'commands', 'skills', 'agents', 'output-styles'];
+                const types = typeFilter ? [typeFilter] : ['hooks', 'commands', 'skills', 'agents', 'output-styles', 'rules'];
 
                 for (const t of types) {
                     const items = builtinComponents[t] || [];
