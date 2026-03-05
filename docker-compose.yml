@@ -14,7 +14,7 @@ services:
       - CHROMA_URL=http://chromadb:8000
       - BASE_URL=${BASE_URL:-http://localhost:${MCP_PORT:-3000}}
     volumes:
-      - calq-data:/data
+      - ./data/calq:/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -59,7 +59,7 @@ services:
     ports:
       - "127.0.0.1:${CHROMA_PORT:-8000}:8000"
     volumes:
-      - chroma-data:/chroma/chroma
+      - ./data/chroma:/chroma/chroma
     environment:
       - ANONYMIZED_TELEMETRY=false
       - ALLOW_RESET=false
@@ -70,6 +70,3 @@ services:
       retries: 5
     restart: unless-stopped
 
-volumes:
-  calq-data:
-  chroma-data:
